@@ -4,10 +4,12 @@ import { db, pastaDeDados, pastaDePdfs, transacao } from '@/lib/db';
 import { apagarLeiturasDoDocumento, inserirLeituras, type NovaLeitura } from '@/lib/leituras';
 import type { ClienteGemini } from '@/lib/ia/cliente';
 import { custoUsd, MENSAGEM_SEM_CHAVE, semSegredo } from '@/lib/ia/config';
-import { classificarDocumento, lerDocumento, somarTentativas } from '@/lib/ia/leitura';
+import { classificarDocumento, lerComConfig, lerDocumento, somarTentativas } from '@/lib/ia/leitura';
+import { tiposAtivos } from '@/lib/treino';
 import { leituraDoRegistro } from '@/lib/ia/linhas';
 import { LEITORES, TIPOS_ADICIONAIS, TIPOS_SEM_LEITURA } from '@/lib/ia/modelos';
 import { ErroGemini, FalhaGeminiComCusto, type Tentativa } from '@/lib/ia/retry';
+import { registrarNota } from '@/lib/notasFiscais';
 import { leiturasDaNfe, lerXmlDocumento, NfeInvalida } from './nfe';
 import { PdfIlegivel } from './paginas';
 import { XmlInvalido } from './xml';
@@ -112,6 +114,8 @@ function processarXml(doc: Documento): ResultadoDocumento {
   if (r.tipo === 'outro_xml') return concluir(doc, { situacao: 'somente_classificado', tipo_documento: 'outro_xml', motivo: 'XML sem extrator disponível', linhas: 0 });
   const linhas = leiturasDaNfe(r.registros, { operacaoId: doc.operacao_id, documentoId: doc.id });
   gravarLeituras(doc, linhas);
+  // NF Status: a situação que o protocolo do XML traz (a consulta no SERPRO pode atualizar depois).
+  registrarNota({ chave_nfe: r.chave_nfe, base_id: doc.base_id, status_nfe: r.status_nfe, origem: 'xml_anexo', xml_content: conteudo });
   return concluir(doc, { situacao: 'lido', tipo_documento: 'nfe_xml', motivo: null, linhas: linhas.length, bruto: { chave_nfe: r.chave_nfe, status_nfe: r.status_nfe } });
 }
 
@@ -132,9 +136,11 @@ async function processarPdf(doc: Documento, deps: Dependencias): Promise<Resulta
   if (!cliente) throw new LeituraRecusada(MENSAGEM_SEM_CHAVE);
   const opcoes = { modelo: deps.modelo, esperar: deps.esperar };
 
+  // Tipos treinados (Gestão › Treinar IA) entram na classificação, antes dos fallbacks.
+  const treinados = tiposAtivos();
   let tipo: string;
   try {
-    const c = await classificarDocumento(cliente, bytes, opcoes);
+    const c = await classificarDocumento(cliente, bytes, opcoes, treinados);
     registrarUso(doc, 'classificacao', deps.modelo, c.tentativas, 'Sucesso');
     tipo = c.tipo;
   } catch (e) {
@@ -142,11 +148,12 @@ async function processarPdf(doc: Documento, deps: Dependencias): Promise<Resulta
     throw e;
   }
 
-  if (LEITORES[tipo]) {
+  const treinado = treinados.find((t) => t.slug === tipo);
+  if (LEITORES[tipo] || treinado) {
     atualizarDocumento(doc.id, { status: 'extraindo', tipo_documento: tipo });
     let leitura;
     try {
-      leitura = await lerDocumento(cliente, bytes, tipo, opcoes);
+      leitura = treinado ? await lerComConfig(cliente, bytes, treinado, opcoes) : await lerDocumento(cliente, bytes, tipo, opcoes);
       registrarUso(doc, 'leitura', deps.modelo, leitura.tentativas, leitura.registros.length ? 'Sucesso' : 'Nenhum dado extraído');
     } catch (e) {
       if (e instanceof FalhaGeminiComCusto) registrarUso(doc, 'leitura', deps.modelo, e.tentativas, `Erro após tentativas (custo cobrado): ${semSegredo(e.message)}`);

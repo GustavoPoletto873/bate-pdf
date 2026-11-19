@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import * as React from 'react';
 import { DesenhoLogoLastro } from '@/components/LogoLastro';
+import { AsasDoPassarinho, Baixista, CSS_BAIXISTA, type ReacaoBx, type RoteiroBaixista } from '@/components/Baixista';
 import { DesenhoRabisco, IconeRabisco, type Rabisco } from '@/components/rabiscos';
 
 /**
@@ -630,6 +631,14 @@ export function RodapeLastro({
   const [talking, setTalking] = React.useState(-1);
   const [hopping, setHopping] = React.useState(-1);
   const talkTimer = React.useRef(0);
+  // O baixista (Baixista.tsx): reações da turma por índice e o "já pode começar".
+  const [reacoes, setReacoes] = React.useState<Record<number, string>>({});
+  const [iniciarBx, setIniciarBx] = React.useState(false);
+  const montadoEm = React.useRef(0);
+  // Amasso das letras (o baixista amassa a A): invólucro só para isso, sem animação CSS,
+  // para não brigar com o carimbo da entrada nem com o tremido do hover.
+  const amassoRefs = React.useRef<(SVGGElement | null)[]>([]);
+  const amassoA = React.useRef({ sx: 1, sy: 1, cx: 0 });
 
   const layout = React.useMemo(() => layoutWord(metrics.advances, tracking, FONT_SIZE), [metrics, tracking]);
   const cap = metrics.cap;
@@ -666,6 +675,79 @@ export function RodapeLastro({
     const pad = 24;
     return { x: l - pad, y: t - pad, w: r - l + pad * 2, h: b - t + pad * 2 };
   }, [layout, placed, cap]);
+
+  // O caminho do baixista sai das letras medidas: O, R, T, S e por fim a A (onde senta).
+  const roteiroBx = React.useMemo<RoteiroBaixista | null>(() => {
+    const idx = ['O', 'R', 'T', 'S', 'A'].map((c) => chars.indexOf(c));
+    if (idx.some((i) => i < 0) || !cap) return null;
+    const escala = (cap / 144) * 0.95;
+    const offsets = [0.12, -0.12, 0.34, -0.22, 0.02];
+    const apoios = idx.map((i, k) => seatPoint('top', layout.x[i], layout.w[i], cap, offsets[k], escala));
+    const menino = placed.find((p) => p.m.kind === 'kid' && p.m.letter === idx[2] && p.seat === 'top');
+    const topoMenino = menino ? menino.y + menino.art.box.t * menino.scale : NaN;
+    const direita = view.x + view.w;
+    return {
+      escala,
+      cap,
+      entrada: { x: direita + 70 * escala, y: 0 },
+      parada: { x: direita + 4 * escala, y: 0 },
+      apoios,
+      obstaculos: [NaN, NaN, topoMenino, NaN],
+    };
+  }, [chars, cap, layout, placed, view]);
+
+  const indiceA = chars.indexOf('A');
+  const pintarAmassoA = React.useCallback(() => {
+    const el = amassoRefs.current[indiceA];
+    if (!el) return;
+    const { sx, sy, cx } = amassoA.current;
+    if (sx === 1 && sy === 1) el.removeAttribute('transform');
+    else el.setAttribute('transform', 'translate(' + cx.toFixed(2) + ' 0) scale(' + sx.toFixed(4) + ' ' + sy.toFixed(4) + ') translate(' + (-cx).toFixed(2) + ' 0)');
+  }, [indiceA]);
+  // O centro da A muda quando a palavra é diagramada de novo (fontes, largura): reaplica.
+  React.useEffect(() => {
+    if (indiceA < 0) return;
+    amassoA.current.cx = layout.x[indiceA] + layout.w[indiceA] / 2;
+    pintarAmassoA();
+  }, [layout, indiceA, pintarAmassoA]);
+  const amassarA = React.useCallback(
+    (sx: number, sy: number) => {
+      amassoA.current = { ...amassoA.current, sx, sy };
+      pintarAmassoA();
+    },
+    [pintarAmassoA],
+  );
+
+  const reagirBx = React.useCallback(
+    (r: ReacaoBx) => {
+      const idx = { T: chars.indexOf('T'), S: chars.indexOf('S'), A: chars.indexOf('A') };
+      const quem = (kind: CrewKind, letra: number) => placed.find((p) => p.m.kind === kind && p.m.letter === letra)?.i;
+      const marcar = (i: number | undefined, cls: string | null) => {
+        if (i === undefined) return;
+        setReacoes((atual) => {
+          const novo = { ...atual };
+          if (cls) novo[i] = cls;
+          else delete novo[i];
+          return novo;
+        });
+      };
+      if (r === 'agacha') {
+        const i = quem('kid', idx.T);
+        marcar(i, 'is-agacha');
+        window.setTimeout(() => marcar(i, null), 1150);
+      } else if (r === 'afunda') marcar(quem('ghost', idx.S), 'is-afunda');
+      else if (r === 'volta') marcar(quem('ghost', idx.S), null);
+      else if (r === 'voa') {
+        const i = quem('bird', idx.A);
+        if (reduced) marcar(i, 'is-voou');
+        else {
+          marcar(i, 'is-voa');
+          window.setTimeout(() => marcar(i, 'is-voou'), 2150);
+        }
+      }
+    },
+    [chars, placed, reduced],
+  );
 
   const words = tagline.split(/\s+/).filter(Boolean);
   const tl = timeline(chars.length, placed.length, words.length, actions.length);
@@ -757,6 +839,24 @@ export function RodapeLastro({
   React.useEffect(() => {
     if (play && !sim.current.start) sim.current.start = performance.now();
   }, [play]);
+
+  // O baixista entra 10 s depois de a página abrir, sem atropelar a animação da logo: espera
+  // o storyboard terminar e o rodapé estar na tela.
+  const totalStoryboard = tl.total;
+  React.useEffect(() => {
+    if (!montadoEm.current) montadoEm.current = performance.now();
+    if (!roteiroBx || iniciarBx) return;
+    const id = window.setInterval(() => {
+      const s = sim.current;
+      const agora = performance.now();
+      const logoPronta = reduced || (s.start > 0 && agora - s.start >= totalStoryboard);
+      if (agora - montadoEm.current >= 10_000 && logoPronta && s.visible && !document.hidden) {
+        setIniciarBx(true);
+        window.clearInterval(id);
+      }
+    }, 400);
+    return () => window.clearInterval(id);
+  }, [roteiroBx, iniciarBx, reduced, totalStoryboard]);
 
   // ---- o laço vivo: olhos, piscadas, rabiscos e a "fervura" das linhas ----
   React.useEffect(() => {
@@ -907,11 +1007,13 @@ export function RodapeLastro({
 
   const renderCrew = (p: (typeof placed)[number], part: 'body' | 'front') => (
     <g key={p.i + part} transform={'translate(' + p.x.toFixed(2) + ' ' + p.y.toFixed(2) + ') scale(' + (p.scale * p.flip).toFixed(4) + ' ' + p.scale.toFixed(4) + ')'}>
+      <g className={'dcf-react' + (reacoes[p.i] ? ' ' + reacoes[p.i] : '')}>
       <g className={'dcf-arrive dcf-arrive-' + p.seat} style={{ '--d': tl.member(p.i) + 'ms' } as React.CSSProperties}>
         <g className={'dcf-hopper' + (hopping === p.i ? ' is-hop' : '')}>
           <g className={'dcf-art' + (p.art.idle ? ' ' + p.art.idle : '')} style={{ '--i': p.i } as React.CSSProperties}>
             {part === 'body' ? (
               <>
+                {p.m.kind === 'bird' && <AsasDoPassarinho />}
                 {p.art.body(hatch)}
                 {p.art.eyes.map((eye, e) => (
                   <g
@@ -938,6 +1040,7 @@ export function RodapeLastro({
           </g>
         </g>
       </g>
+      </g>
     </g>
   );
 
@@ -952,7 +1055,7 @@ export function RodapeLastro({
       onPointerDown={onPointerMove}
       onPointerLeave={onPointerLeave}
     >
-      <style>{CSS}</style>
+      <style>{CSS + CSS_BAIXISTA}</style>
 
       <div className="dcf-top dcf-rise" style={{ '--d': '0ms' } as React.CSSProperties}>
         <div className="dcf-brand">
@@ -1027,9 +1130,11 @@ export function RodapeLastro({
               c === ' ' ? null : (
                 <g key={i} className="dcf-letter" style={{ '--d': tl.letter(i) + 'ms', '--r': ((hash(i * 2.3) - 0.5) * 9).toFixed(2) + 'deg' } as React.CSSProperties}>
                   <g className="dcf-glyph">
-                    <text x={layout.x[i]} y={0} fontSize={FONT_SIZE} fontWeight={900} style={{ fontFamily }} filter={'url(#' + uid + '-ink)'}>
-                      {c}
-                    </text>
+                    <g ref={(el) => void (amassoRefs.current[i] = el)}>
+                      <text x={layout.x[i]} y={0} fontSize={FONT_SIZE} fontWeight={900} style={{ fontFamily }} filter={'url(#' + uid + '-ink)'}>
+                        {c}
+                      </text>
+                    </g>
                   </g>
                   <path
                     className="dcf-dust"
@@ -1042,10 +1147,11 @@ export function RodapeLastro({
             <g ref={(el) => void (crewLayerRefs.current[1] = el)}>
               {placed.filter((p) => p.seat === 'behind').map((p) => renderCrew(p, 'front'))}
               {placed.filter((p) => p.seat !== 'behind').map((p) => renderCrew(p, 'body'))}
+              {roteiroBx && <Baixista roteiro={roteiroBx} iniciar={iniciarBx} reduzido={reduced} hatch={hatch} onReacao={reagirBx} amassarA={amassarA} />}
             </g>
 
             {interactive &&
-              placed.map((p) => {
+              placed.filter((p) => !String(reacoes[p.i] ?? '').startsWith('is-vo')).map((p) => {
                 const bx = p.flip > 0 ? [p.art.box.l, p.art.box.r] : [-p.art.box.r, -p.art.box.l];
                 const top = p.art.box.t;
                 const bottom = p.seat === 'behind' ? -30 : p.art.box.b;

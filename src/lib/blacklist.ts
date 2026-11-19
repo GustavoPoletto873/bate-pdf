@@ -385,3 +385,46 @@ export function alertaDaBase(baseId: string): AlertaBlackList[] {
     return [];
   }
 }
+
+export type ResumoBlackListRelatorio = {
+  verificado: boolean;
+  entidades_monitoradas: number;
+  total_ocorrencias: number;
+  total_linhas: number;
+  texto: string;
+  itens: { nome: string; documento: string; papel: string; quantidade: number; valor_nominal: number; valor_presente: number; percentual_nominal: number; percentual_presente: number }[];
+};
+
+/**
+ * Quadro "Monitoramento de lista restritiva (BlackList)" do relatório NIX (resumo_para_base do
+ * Bate Lastro). Varre a base antes de ler: o relatório não depende da varredura do upload.
+ */
+export function resumoParaRelatorio(baseId: string | null): ResumoBlackListRelatorio {
+  if (!baseId) {
+    return { verificado: false, entidades_monitoradas: 0, total_ocorrencias: 0, total_linhas: 0, itens: [], texto: 'Verificação de BlackList não aplicável: sem base de auditoria.' };
+  }
+  varrerBase(baseId);
+  const entradas = ativas();
+  if (!entradas.length) {
+    return { verificado: true, entidades_monitoradas: 0, total_ocorrencias: 0, total_linhas: 0, itens: [], texto: 'Não há entidades cadastradas na BlackList para monitoramento.' };
+  }
+  const base = totaisDasBases([baseId]).get(baseId);
+  const porEntrada = new Map(agregar({ bases: [baseId] }).map((a) => [a.entrada_id, a]));
+  const itens = base ? entradas.flatMap((e) => {
+    const a = porEntrada.get(e.id);
+    if (!a) return [];
+    const f = linhaFundo(a, base);
+    const papel = [f.linhas_cedente ? 'Cedente' : '', f.linhas_sacado ? 'Sacado' : ''].filter(Boolean).join(' / ');
+    return [{
+      nome: e.nome, documento: formatarCpfCnpj(e.documento), papel, quantidade: f.linhas, valor_nominal: f.valor_nominal,
+      valor_presente: f.valor_presente, percentual_nominal: f.percentual_nominal, percentual_presente: f.percentual_presente,
+    }];
+  }).sort((x, y) => y.valor_nominal - x.valor_nominal) : [];
+  const totalLinhas = itens.reduce((s, i) => s + i.quantidade, 0);
+  return {
+    verificado: true, entidades_monitoradas: entradas.length, total_ocorrencias: itens.length, total_linhas: totalLinhas, itens,
+    texto: itens.length
+      ? `Foram identificadas ${itens.length} de ${entradas.length} entidades monitoradas na BlackList, em ${totalLinhas} linhas da base, conforme quadro abaixo.`
+      : `Nenhuma das ${entradas.length} entidades monitoradas na BlackList foi identificada como cedente ou sacado na base.`,
+  };
+}

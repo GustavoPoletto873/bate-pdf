@@ -167,6 +167,21 @@ export function criarAdministradora(nome: unknown): Administradora {
   return { id: Number(r.lastInsertRowid), nome: limpo, total_fundos: 0 };
 }
 
+export type DadosAdministradora = { id: number; nome: string; razao_social: string | null; endereco: string | null; endereco_complemento: string | null };
+
+/** Razão social e endereço: o que os relatórios CVM/NIX imprimem da administradora. */
+export function atualizarAdministradora(id: number, dados: { razao_social?: unknown; endereco?: unknown; endereco_complemento?: unknown }): DadosAdministradora {
+  exigirAdministradora(id);
+  const campo = (v: unknown) => {
+    const t = textoOuNulo(v);
+    if (t && t.length > 300) throw new ErroDeUso('Cada campo pode ter no máximo 300 caracteres.');
+    return t;
+  };
+  db().prepare('UPDATE administradoras SET razao_social = ?, endereco = ?, endereco_complemento = ? WHERE id = ?')
+    .run(campo(dados.razao_social), campo(dados.endereco), campo(dados.endereco_complemento), id);
+  return db().prepare('SELECT id, nome, razao_social, endereco, endereco_complemento FROM administradoras WHERE id = ?').get(id) as DadosAdministradora;
+}
+
 function exigirAdministradora(id: number) {
   const ok = db().prepare('SELECT 1 FROM administradoras WHERE id = ?').get(id);
   if (!ok) throw new ErroDeUso('Administradora não encontrada. Atualize a página e escolha de novo.', 404);

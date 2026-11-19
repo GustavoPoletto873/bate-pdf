@@ -156,8 +156,8 @@ export function GestaoDeBates({ baseId }: { baseId: string }) {
         <Indicador rotulo="Bates Pendentes" valor={painel.pendentes.termo + painel.pendentes.lastro} cor="rosa" detalhe={`Termos: ${painel.pendentes.termo} | Lastros: ${painel.pendentes.lastro}`} />
         <Indicador rotulo="Pré-Bates a Confirmar" valor={painel.total_pre_matches} cor="ambar" detalhe={`Termos: ${painel.pre_matches.termo} | Lastros: ${painel.pre_matches.lastro}`} />
         <Indicador rotulo="Total Registros na Base" valor={painel.total_registros} detalhe="Quantidade de itens na base" />
-        <Indicador rotulo="Leitura Termos" valor={painel.leituras.termo} cor="indigo" detalhe="Total de linhas lidas" />
-        <Indicador rotulo="Leitura Lastros" valor={painel.leituras.lastro} cor="indigo" detalhe={`Total de linhas lidas${painel.leituras.orfas ? ` · ${painel.leituras.orfas} sem título` : ''}`} />
+        <Indicador rotulo="Leitura Termos" valor={painel.leituras.termo} cor="indigo" detalhe={`Documentos lidos · ${painel.leituras.linhas_termo} linha(s)`} />
+        <Indicador rotulo="Leitura Lastros" valor={painel.leituras.lastro} cor="indigo" detalhe={`Documentos lidos · ${painel.leituras.linhas_lastro} linha(s)${painel.leituras.orfas ? ` · ${painel.leituras.orfas} sem título` : ''}`} />
       </div>
 
       <Secao className="mb-6">
