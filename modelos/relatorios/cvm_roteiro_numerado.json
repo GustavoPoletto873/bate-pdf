@@ -1,0 +1,97 @@
+[
+  {
+    "chave": "cvm_01",
+    "titulo": "1. Análise de resultado e aderência à política de investimentos e limites de composição estabelecidos em Regulamento.",
+    "texto": "A carteira esta enquadrada em relação aos limites de composição e diversificação de portfólio estabelecidos no Regulamento e na CVM 157/22, conforme alterada."
+  },
+  {
+    "chave": "cvm_02",
+    "titulo": "2. Taxas utilizadas nas operações.",
+    "texto": "Os ativos integrantes da carteira são precificados conforme a sua curva de aquisição. Os demais ativos da carteira são precificados de acordo com o manual de precificação do Administrador."
+  },
+  {
+    "chave": "cvm_03",
+    "titulo": "3. Os procedimentos de verificação de lastro por amostragem adotados pelo Custodiante.",
+    "texto": "A amostragem dos direitos creditórios foi realizada de acordo com a politica de verificação disponibilizada pelo custodiante. Os itens selecionados contemplaram vencidos, maiores cedentes da carteira, maiores cedentes recomprados e demais itens selecionados aleatóriamente pelas aquisições do período."
+  },
+  {
+    "chave": "cvm_04",
+    "titulo": "4. Resultados da verificação do lastro por amostragem.",
+    "texto": "Para casos em que o Custodiante verifique créditos inexistentes, com pendência de lastro ou que apresentaram outras inconsistências que possam incorrer em embaraço à cobrança regular ou judicial, o Administrador adota as seguintes ações, conforme o caso e pela ordem: (i) notificação imediata das ocorrências para o Gestor, Consultor de Crédito e Agente de Cobrança dos direitos creditórios contratados pelo Fundo a fim de determinarem do respectivo Cedente a liquidação ou substituição dos referidos títulos em até 5 (cinco) dias úteis; (ii) o bloqueio imediato de novas operações do Fundo junto ao respectivo Cedente enquanto persistirem créditos em desconformidade na carteira do Fundo; e (iii) a submissão da situação ao Comitê de Crédito do Administrador para eventual aplicação de provisionamento de valores em face da percepção do risco de crédito das operações. O Fundo não possui direitos creditórios na data base para verificação de lastro."
+  },
+  {
+    "chave": "cvm_05",
+    "titulo": "5.a. A natureza dos direitos creditórios a serem adquiridos e dos instrumentos jurídicos, contratos ou outros documentos representativos do crédito.",
+    "texto": "Não houve alterações no período de referência."
+  },
+  {
+    "chave": "cvm_06",
+    "titulo": "5.b. Descrição dos mecanismos e procedimentos de cobrança dos direitos creditórios, inclusive inadimplentes, coleta e pagamento/rateio destas despesas entre os membros do condomínio, caso assim seja determinado pelo regulamento do Fundo.",
+    "texto": "Não houve alterações no período de referência."
+  },
+  {
+    "chave": "cvm_07",
+    "titulo": "6. Efeitos das alterações apontadas no Item 5 sobre a rentabilidade da carteira.",
+    "texto": "Não houve alterações no período de referência."
+  },
+  {
+    "chave": "cvm_08",
+    "titulo": "7.a. Alterações nos critérios para a concessão de crédito adotados por originadores que representem, individualmente, 10% ou mais da carteira do Fundo no trimestre.",
+    "texto": "Não houve alterações no período de referência."
+  },
+  {
+    "chave": "cvm_09",
+    "titulo": "7.b. Critérios para a concessão de crédito adotados pelos originadores que representem, individualmente, 10% ou mais da carteira do fundo no trimestre.",
+    "texto": "Não houve alterações no período de referência."
+  },
+  {
+    "chave": "cvm_10",
+    "titulo": "8. Garantias existentes para o conjunto de ativos.",
+    "texto": "Não houve alterações no período de referência."
+  },
+  {
+    "chave": "cvm_11",
+    "titulo": "9.a. Descrição de contratos relevantes firmados na cessão dos direitos creditórios ao fundo.",
+    "texto": "Toda e qualquer operação realizada pelo Fundo deve estar em consonância com os termos estabelecidos no Contrato de Cessão, celebrado, individualmente, com cada um dos cedentes.\n\nAdicionalmente, cada uma das cessões de direitos de crédito deve ser formalizada através de Termo de Cessão."
+  },
+  {
+    "chave": "cvm_12",
+    "titulo": "9.b. Indicação do caráter definitivo, ou não, da cessão.",
+    "texto": "Não houve alterações no período de referência."
+  },
+  {
+    "chave": "cvm_13",
+    "titulo": "10. Impacto no valor do patrimônio líquido do Fundo e na rentabilidade da carteira dos eventos de pré-pagamento.",
+    "texto": "Não houve alterações no período de referência."
+  },
+  {
+    "chave": "cvm_14",
+    "titulo": "11. Análise do impacto dos eventos de pré-pagamento descrito no Item 10.",
+    "texto": "Não houve alterações no período de referência."
+  },
+  {
+    "chave": "cvm_15",
+    "titulo": "12. Condições de alienação, a qualquer título, inclusive por venda ou permuta, de direitos creditórios, incluindo.",
+    "texto": "A qualquer tempo, o Fundo pode alienar a terceiros, e mesmo ao Cedente (recompra), os direitos creditórios integrantes de sua carteira."
+  },
+  {
+    "chave": "cvm_16",
+    "titulo": "13. Impacto no valor do patrimônio líquido do fundo e na rentabilidade da carteira de uma possível descontinuidade nas operações de alienação de direitos creditórios realizadas.",
+    "texto": "Em uma eventual descontinuidade nas operações de alienação de direitos creditórios integrantes da carteira do Fundo, os recebíveis seriam levados até a respectiva data de vencimento e precificados conforme metodologia estabelecida, podendo, inclusive, acarretar redução da rentabilidade e, até mesmo, incorrer em perdas, no caso de inadimplência."
+  },
+  {
+    "chave": "cvm_17",
+    "titulo": "14. Análise do impacto da descontinuidade das alienações descrito Item 13.",
+    "texto": "Não houve impacto decorrente de descontinuidade das alienações descritas no Item 13."
+  },
+  {
+    "chave": "cvm_18",
+    "titulo": "15. Eventos previstos nos contratos firmados para estruturar a operação que acarretaram a amortização antecipada dos direitos creditórios cedidos ao Fundo.",
+    "texto": "No período analisado, não ocorreu qualquer evento previstos nos contratos firmados que acarretassem amortização antecipada dos direitos creditórios cedidos ao Fundo."
+  },
+  {
+    "chave": "cvm_19",
+    "titulo": "16. Informações sobre fatos ocorridos que afetaram a regularidade dos fluxos de pagamento previstos.",
+    "texto": "No período analisado, não houve ocorrências que afetaram a regularidade dos fluxos de pagamentos previstos."
+  }
+]

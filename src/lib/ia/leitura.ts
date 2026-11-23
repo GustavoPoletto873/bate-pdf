@@ -3,6 +3,7 @@ import { esquemaJson, validarModelo } from './esquema';
 import { LEITORES, MODELO_CLASSIFICACAO, PROMPT_CLASSIFICACAO, tipoClassificado } from './modelos';
 import { gerarComRetry, type Tentativa } from './retry';
 import { registrosDaLeitura, type RegistroLeitura } from './linhas';
+import { classificacaoCom, construirModeloExtracao, construirPromptExtracao, type ConfigTipo } from './personalizados';
 
 /**
  * As duas etapas do Gemini no Anexo: classificar_documento (o tipo do documento) e
@@ -14,13 +15,31 @@ const ESQUEMAS_LEITURA = Object.fromEntries(Object.entries(LEITORES).map(([tipo,
 
 export type Opcoes = { modelo: string; esperar?: (ms: number) => Promise<void>; esperaMs?: number };
 
-export async function classificarDocumento(cliente: ClienteGemini, pdf: Uint8Array, opcoes: Opcoes):
+/** `tipos`: os tipos treinados ativos (Treinar IA) entram na classificação, antes dos fallbacks. */
+export async function classificarDocumento(cliente: ClienteGemini, pdf: Uint8Array, opcoes: Opcoes, tipos: ConfigTipo[] = []):
   Promise<{ tipo: string; bruto: unknown; tentativas: Tentativa[] }> {
+  if (tipos.length) {
+    const { modelo, prompt } = classificacaoCom(tipos);
+    const r = await gerarComRetry({ cliente, pdf, prompt, esquema: esquemaJson(modelo), validar: (json) => validarModelo(modelo, json), ...opcoes });
+    const tipo = modelo.campos.find((c) => r.valor[c.nome] === true)?.nome ?? 'outro_documento';
+    return { tipo, bruto: r.bruto, tentativas: r.tentativas };
+  }
   const r = await gerarComRetry({
     cliente, pdf, prompt: PROMPT_CLASSIFICACAO, esquema: ESQUEMA_CLASSIFICACAO,
     validar: (json) => validarModelo(MODELO_CLASSIFICACAO, json), ...opcoes,
   });
   return { tipo: tipoClassificado(r.valor), bruto: r.bruto, tentativas: r.tentativas };
+}
+
+/** Extração de um tipo treinado: modelo e prompt montados da configuração. */
+export async function lerComConfig(cliente: ClienteGemini, pdf: Uint8Array, cfg: ConfigTipo, opcoes: Opcoes):
+  Promise<{ registros: RegistroLeitura[]; dados: Record<string, unknown>; tentativas: Tentativa[] }> {
+  const modelo = construirModeloExtracao(cfg);
+  const r = await gerarComRetry({
+    cliente, pdf, prompt: construirPromptExtracao(cfg), esquema: esquemaJson(modelo),
+    validar: (json) => validarModelo(modelo, json), ...opcoes,
+  });
+  return { registros: registrosDaLeitura(r.valor), dados: r.valor, tentativas: r.tentativas };
 }
 
 /** Tipos com leitura por IA (o doc_config do main_lastro.py, sem o CT-e). */

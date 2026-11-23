@@ -276,7 +276,7 @@ export function obterLote(loteId: string): {
 }
 
 /** "Tentar de novo": documentos com erro voltam para a fila (cada tentativa é cobrada de novo). */
-export function tentarDeNovo(documentoIds: number[]): number {
+export function tentarDeNovo(documentoIds: number[], situacoes: string[] = ['erro']): number {
   if (!documentoIds.length) return 0;
   const momento = agora();
   const n = transacao(() => {
@@ -284,7 +284,7 @@ export function tentarDeNovo(documentoIds: number[]): number {
     let total = 0;
     for (const id of documentoIds) {
       const doc = c.prepare(`SELECT d.id, l.base_id FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id
-        WHERE d.id = ? AND d.status = 'erro'`).get(id) as { id: number; base_id: string } | undefined;
+        WHERE d.id = ? AND d.status IN (${situacoes.map(() => '?').join(',')})`).get(id, ...situacoes) as { id: number; base_id: string } | undefined;
       if (!doc) continue;
       c.prepare("UPDATE anexo_documentos SET status = 'enfileirado', motivo = NULL, atualizado_em = ? WHERE id = ?").run(momento, id);
       const job = c.prepare('SELECT id FROM jobs WHERE documento_id = ? ORDER BY id DESC LIMIT 1').get(id) as { id: number } | undefined;
@@ -296,6 +296,11 @@ export function tentarDeNovo(documentoIds: number[]): number {
   });
   if (n) chutarFila();
   return n;
+}
+
+/** "Ler de novo" depois de treinar um tipo: vale também para o que só foi classificado. */
+export function lerDeNovo(documentoIds: number[]): number {
+  return tentarDeNovo(documentoIds, ['erro', 'somente_classificado']);
 }
 
 /** Ids dos documentos com erro de uma base (Tentar todos de novo). */

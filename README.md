@@ -4,9 +4,9 @@ Uma cópia do **Bate Lastro** (branch `feat/pre-classificacao-bater-pdf`) que ro
 continuar trabalhando quando o Bate Lastro estiver fora do ar. Mesmas pastas do menu e mesmas rotas:
 
 - **Home** (`/`): continue de onde parou, suas bases e o passo a passo.
-- **Gestão** › Upload Base (`/base`), Anexo (`/anexo`), Fundos (`/cadastro-fundo`), Amostra (`/amostra`),
-  BlackList (`/blacklist`). Treinar IA e Relatórios CVM/NIX: em breve.
-- **Análise** › Dashboard (`/home`), Visualizar (`/visualizar`), Lotes (`/lotes`). NF Status: em breve.
+- **Gestão** › Upload Base (`/base`), Anexo (`/anexo`), Fundos (`/cadastro-fundo`), Treinar IA (`/treinamento-ia`),
+  Relatórios CVM/NIX (`/relatorios`), Amostra (`/amostra`), BlackList (`/blacklist`).
+- **Análise** › Dashboard (`/home`), Visualizar (`/visualizar`), Lotes (`/lotes`), NF Status (`/acompanhamento-nota-fiscal`).
 - **Bates** (`/auditoria-selection`) › Gestão de Bates (`/pre-matches`), Resultados (`/results`) e o **Bater PDF**
   com pré-classificação (`/bases/<id>`).
 - **Perfil** (`/perfil`): modo escuro e a chave do Gemini.
@@ -100,6 +100,24 @@ GEMINI_MODELO=gemini-3.1-flash-lite   # opcional
 
 Sem a chave, os PDFs ficam com erro e podem ser lidos depois com **Tentar de novo**. A fila roda dentro do servidor
 (2 leituras por vez); se o servidor parar no meio, a leitura interrompida vira erro e **não** é refeita sozinha.
+
+## Telas trazidas depois
+
+- **Bater PDF** no layout do Bate Lastro: busca + PDF à esquerda, tabela "O que ainda falta resolver" à direita (um selo
+  V/D/P por campo, "Buscar" em cada linha), divisória arrastável, recolher a tabela e tela cheia.
+- **Relatórios CVM/NIX**: carteira do informe mensal FIDC da CVM (dados abertos, baixado por competência e guardado em
+  `<dados>/cvm/`), base de auditoria do trimestre, revisão dos textos do questionário e emissão em `.docx` com os
+  modelos do Bate Lastro (`modelos/relatorios/`), um fundo ou em lote (.zip). Garantias saem como n/i (como lá); a
+  assinatura do sócio e a logo da administradora não vêm para cá. Razão social e endereço da administradora são
+  preenchidos na própria revisão.
+- **Treinar IA**: tipos de documento treinados (descrever → testar num PDF → salvar; o salvar exige teste da mesma
+  configuração) entram na classificação e na leitura do Anexo. "Documentos para treinar" lista o que a IA classificou
+  como outro documento / intervenção humana, com grupos, ignorar e "Ler de novo".
+- **NF Status**: situação das NF-e pelos XML lidos no Anexo e, com `SERPRO_CONSUMER_KEY`/`SERPRO_SECRET_KEY` no
+  `.env.local`, pela consulta no SERPRO (cobrada). Exporta Excel e o XML de cada nota.
+- **Resultados › Exportar documentos**: ZIP para o dossiê (pastas das operações, XML das NF-e,
+  `00_INDICE_AUDITORIA.xlsx` e `SHA256SUMS.txt`).
+- **Gestão de Bates**: Leitura Termos/Lastros conta documentos lidos (as linhas aparecem no detalhe).
 
 ## Estrutura
 

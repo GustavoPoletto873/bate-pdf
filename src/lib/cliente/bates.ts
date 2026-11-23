@@ -46,5 +46,6 @@ export const apiBates = {
     return chamar<ResumoInsercao>(`/api/bases/${baseId}/inserir-resultado`, { method: 'POST', body: form });
   },
   urlExportar: (baseId: string) => `/api/bases/${baseId}/exportar?formato=xlsx`,
+  urlDocumentos: (baseId: string, escopo: 'vinculados' | 'todos') => `/api/bases/${baseId}/exportar-documentos?escopo=${escopo}`,
   urlPendencias: (baseId: string, layout: 1 | 2) => `/api/bases/${baseId}/exportar-pendencias?layout=${layout}`,
 };

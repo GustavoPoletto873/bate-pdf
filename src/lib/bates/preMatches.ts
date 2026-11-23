@@ -261,7 +261,8 @@ export type PainelBates = {
   total_pre_matches: number;
   pre_matches: { termo: number; lastro: number };
   total_registros: number;
-  leituras: { termo: number; lastro: number; orfas: number };
+  /** Documentos lidos (PDF/XML distintos) por lado; `linhas_*` = linhas de leitura (um documento pode trazer várias parcelas). */
+  leituras: { termo: number; lastro: number; orfas: number; linhas_termo: number; linhas_lastro: number };
   pode_processar: boolean;
   motivo_processar: MotivoProcessar;
 };
@@ -278,9 +279,12 @@ export function painelDaBase(baseId: string): PainelBates {
     AND NOT EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.pendencia_id = p.id) GROUP BY p.lado`).all(baseId) as { lado: Lado; n: number }[];
   const pre = c.prepare(`SELECT p.lado, COUNT(*) n FROM pre_matches pm JOIN pendencias p ON p.id = pm.pendencia_id
     WHERE pm.base_id = ? GROUP BY p.lado`).all(baseId) as { lado: Lado; n: number }[];
-  const leituras = c.prepare(`SELECT l.tipo_recebivel,
+  const leituras = c.prepare(`SELECT l.id, l.pdf_id, l.documento_id, l.tipo_recebivel,
       (EXISTS (SELECT 1 FROM vinculos v WHERE v.leitura_id = l.id) OR EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.leitura_id = l.id)) AS usada
-    FROM leituras l WHERE l.base_id = ?`).all(baseId) as { tipo_recebivel: string | null; usada: number }[];
+    FROM leituras l WHERE l.base_id = ?`).all(baseId) as { id: number; pdf_id: number | null; documento_id: number | null; tipo_recebivel: string | null; usada: number }[];
+  // Um documento conta uma vez: o do Anexo, senão o PDF, senão a própria linha (planilha/manual).
+  const documentos = (lado: Lado) => new Set(leituras.filter((l) => ladoDaLeitura(l.tipo_recebivel) === lado)
+    .map((l) => (l.documento_id != null ? `d${l.documento_id}` : l.pdf_id != null ? `p${l.pdf_id}` : `l${l.id}`))).size;
   const n = (lista: { lado: Lado; n: number }[], lado: Lado) => lista.find((x) => x.lado === lado)?.n ?? 0;
   const pp = podeProcessar(baseId);
   return {
@@ -291,8 +295,10 @@ export function painelDaBase(baseId: string): PainelBates {
     pre_matches: { termo: n(pre, 'termo'), lastro: n(pre, 'lastro') },
     total_registros: um<{ n: number }>('SELECT COUNT(*) n FROM titulos WHERE base_id = ?', baseId).n,
     leituras: {
-      termo: leituras.filter((l) => ladoDaLeitura(l.tipo_recebivel) === 'termo').length,
-      lastro: leituras.filter((l) => ladoDaLeitura(l.tipo_recebivel) === 'lastro').length,
+      termo: documentos('termo'),
+      lastro: documentos('lastro'),
+      linhas_termo: leituras.filter((l) => ladoDaLeitura(l.tipo_recebivel) === 'termo').length,
+      linhas_lastro: leituras.filter((l) => ladoDaLeitura(l.tipo_recebivel) === 'lastro').length,
       orfas: leituras.filter((l) => !l.usada).length,
     },
     pode_processar: pp.pode_processar,

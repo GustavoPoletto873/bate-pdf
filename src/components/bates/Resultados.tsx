@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { BarChart3, Download, FileWarning, Loader2, Lock, RotateCcw, Unlock } from 'lucide-react';
+import { BarChart3, Download, FileArchive, FileWarning, Loader2, Lock, RotateCcw, Unlock } from 'lucide-react';
 import { apiBates, type FiltroResultadosTela, type RespostaResultados } from '@/lib/cliente/bates';
 import { ErroApi } from '@/lib/cliente';
 import type { LinhaResultado } from '@/lib/bates/resultados';
@@ -80,6 +80,7 @@ export function Resultados({ baseId }: { baseId: string }) {
   const [detalhe, setDetalhe] = useState<LinhaResultado | null>(null);
   const [pdf, setPdf] = useState<{ id: number; nome: string; pagina: number | null } | null>(null);
   const [dialogoPendencias, setDialogoPendencias] = useState(false);
+  const [dialogoDocumentos, setDialogoDocumentos] = useState(false);
   const [salvando, setSalvando] = useState(false);
   const chave = JSON.stringify([filtro, versao]);
 
@@ -139,6 +140,7 @@ export function Resultados({ baseId }: { baseId: string }) {
             <Download className="size-4" /> Exportar para Excel
           </LinkBotao>
           <Botao onClick={() => setDialogoPendencias(true)} title="Extrair todas as pendências TERMO e LASTRO desta base"><FileWarning className="size-4" /> Exportar pendências</Botao>
+          <Botao onClick={() => setDialogoDocumentos(true)} title="ZIP com os documentos usados nos bates e um índice de auditoria"><FileArchive className="size-4" /> Exportar documentos</Botao>
         </>
       }
     >
@@ -284,6 +286,15 @@ export function Resultados({ baseId }: { baseId: string }) {
 
       <DialogoComparacao linha={detalhe} onFechar={() => setDetalhe(null)} onVerPdf={(p) => { setDetalhe(null); setPdf(p); }} />
       <DialogoPdf pdf={pdf} onFechar={() => setPdf(null)} />
+      <Dialogo aberto={dialogoDocumentos} titulo="Exportar documentos" onFechar={() => setDialogoDocumentos(false)} largura="max-w-lg">
+        <div className="space-y-3 text-sm">
+          <p className="font-serif text-slate-600 dark:text-slate-400">Um ZIP para o dossiê da auditoria: os documentos (com as pastas das operações do Anexo), os XML das NF-e, o índice 00_INDICE_AUDITORIA.xlsx (arquivos e vínculos título × documento) e o SHA256SUMS.txt para conferir a integridade.</p>
+          <div className="grid gap-2">
+            <LinkBotao href={apiBates.urlDocumentos(baseId, 'vinculados')} download variante="primario"><Download className="size-4" /> Só os documentos com bate</LinkBotao>
+            <LinkBotao href={apiBates.urlDocumentos(baseId, 'todos')} download><Download className="size-4" /> Todos os documentos da base</LinkBotao>
+          </div>
+        </div>
+      </Dialogo>
       <Dialogo aberto={dialogoPendencias} titulo="Exportar pendências" onFechar={() => setDialogoPendencias(false)} largura="max-w-lg">
         <div className="space-y-3 text-sm">
           <p className="font-serif text-slate-600 dark:text-slate-400">Os títulos ainda sem documento (pré-bate conta como atendido). Escolha o layout:</p>

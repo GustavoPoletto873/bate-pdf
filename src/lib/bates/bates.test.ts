@@ -49,6 +49,17 @@ function leitura(baseId: string, d: Record<string, string | number | null>) {
   return Number(r.lastInsertRowid);
 }
 
+describe('painel da Gestão de Bates', () => {
+  test('Leitura Termos/Lastros conta documentos, não linhas', () => {
+    const id = criarBase([titulo('2001', '10.00', '2026-10-10')]);
+    const pdf = repo.registrarPdf(id, { nome_arquivo: 'ccb-parcelas.pdf', caminho_relativo: null, sha256: 'p1', tamanho: 1 });
+    // Uma CCB com 3 parcelas = 3 linhas de leitura, 1 documento.
+    for (const n of ['1', '2', '3']) leitura(id, { pdf_id: pdf.id, tipo_recebivel: 'ccb', numero_documento: `2001-${n}` });
+    leitura(id, { tipo_recebivel: 'termo_cessao', numero_documento: '2001' });
+    expect(pre.painelDaBase(id).leituras).toMatchObject({ termo: 1, lastro: 1, linhas_termo: 1, linhas_lastro: 3 });
+  });
+});
+
 describe('Processar Base → pré-bates → confirmar/rejeitar', () => {
   test('fluxo completo da Gestão de Bates', () => {
     const id = criarBase([titulo('1001', '100.00', '2026-10-10'), titulo('1002', '200.00', '2026-11-10'), titulo('1003', '300.00', '2026-12-10')]);

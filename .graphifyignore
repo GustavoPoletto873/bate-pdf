@@ -1,0 +1,10 @@
+# O graphify indexa só o código do app; dados, build e dependências ficam de fora.
+data/
+modelos/
+node_modules/
+.next/
+public/
+graphify-out/
+*.docx
+*.xlsx
+*.pdf
