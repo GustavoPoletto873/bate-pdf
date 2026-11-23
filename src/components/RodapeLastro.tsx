@@ -1006,7 +1006,7 @@ export function RodapeLastro({
   const pct = (v: number, base: number, span: number) => (((v - base) / span) * 100).toFixed(3) + '%';
 
   const renderCrew = (p: (typeof placed)[number], part: 'body' | 'front') => (
-    <g key={p.i + part} transform={'translate(' + p.x.toFixed(2) + ' ' + p.y.toFixed(2) + ') scale(' + (p.scale * p.flip).toFixed(4) + ' ' + p.scale.toFixed(4) + ')'}>
+    <g key={p.i + part} ref={(el) => void (crewLayerRefs.current[10 + p.i * 2 + (part === 'front' ? 1 : 0)] = el)} transform={'translate(' + p.x.toFixed(2) + ' ' + p.y.toFixed(2) + ') scale(' + (p.scale * p.flip).toFixed(4) + ' ' + p.scale.toFixed(4) + ')'}>
       <g className={'dcf-react' + (reacoes[p.i] ? ' ' + reacoes[p.i] : '')}>
       <g className={'dcf-arrive dcf-arrive-' + p.seat} style={{ '--d': tl.member(p.i) + 'ms' } as React.CSSProperties}>
         <g className={'dcf-hopper' + (hopping === p.i ? ' is-hop' : '')}>
@@ -1115,8 +1115,10 @@ export function RodapeLastro({
               </filter>
             </defs>
 
-            <g ref={(el) => void (crewLayerRefs.current[0] = el)}>
-              <g className="dcf-ground">
+            <g>
+              {/* O tremido das linhas vai em cada desenho (chão, cada personagem, o baixista), não na
+                  camada inteira: quem se mexe só obriga o navegador a refazer o filtro do próprio pedaço. */}
+              <g className="dcf-ground" ref={(el) => void (crewLayerRefs.current[0] = el)}>
                 <path className="dcf-draw" pathLength={1} d={ground.d} style={{ '--d': tl.ground + 'ms' } as React.CSSProperties} />
                 <path className="dcf-tufts dcf-fade" d={ground.tufts} style={{ '--d': tl.ground + 500 + 'ms' } as React.CSSProperties} />
                 {ground.pebbles.map((pb, k) => (
@@ -1144,9 +1146,12 @@ export function RodapeLastro({
               ),
             )}
 
-            <g ref={(el) => void (crewLayerRefs.current[1] = el)}>
+            <g>
               {placed.filter((p) => p.seat === 'behind').map((p) => renderCrew(p, 'front'))}
               {placed.filter((p) => p.seat !== 'behind').map((p) => renderCrew(p, 'body'))}
+            </g>
+
+            <g ref={(el) => void (crewLayerRefs.current[1] = el)}>
               {roteiroBx && <Baixista roteiro={roteiroBx} iniciar={iniciarBx} reduzido={reduced} hatch={hatch} onReacao={reagirBx} amassarA={amassarA} />}
             </g>
 
