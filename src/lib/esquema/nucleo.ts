@@ -132,4 +132,11 @@ CREATE TABLE IF NOT EXISTS pre_classificacoes (
     { tabela: 'vinculos', coluna: 'tipo_match', definicao: "TEXT NOT NULL DEFAULT 'manual'" },
     { tabela: 'vinculos', coluna: 'similaridade', definicao: 'REAL' },
   ],
+  indices: [
+    // "Esta leitura já foi usada?" (painel da Gestão de Bates, pendências e órfãs, Processar Base).
+    'CREATE INDEX IF NOT EXISTS idx_vinculos_leitura ON vinculos(leitura_id)',
+    'CREATE INDEX IF NOT EXISTS idx_vinculos_pdf ON vinculos(pdf_id)',
+    'CREATE INDEX IF NOT EXISTS idx_pendencias_titulo ON pendencias(titulo_id)',
+    'CREATE INDEX IF NOT EXISTS idx_bases_fundo ON bases(fundo_id)',
+  ],
 };

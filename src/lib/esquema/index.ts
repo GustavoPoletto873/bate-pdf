@@ -26,4 +26,5 @@ export function aplicarEsquemas(conexao: DatabaseSync, esquemas: Esquema[] = ESQ
       if (!existentes.some((x) => x.name === c.coluna)) conexao.exec(`ALTER TABLE ${c.tabela} ADD COLUMN ${c.coluna} ${c.definicao}`);
     }
   }
+  for (const e of esquemas) for (const sql of e.indices ?? []) conexao.exec(sql);
 }

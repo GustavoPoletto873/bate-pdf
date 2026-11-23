@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS anexo_documentos (
   atualizado_em TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_anexo_documentos_lote ON anexo_documentos(lote_id);
+CREATE INDEX IF NOT EXISTS idx_anexo_lotes_base ON anexo_lotes(base_id);
 
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

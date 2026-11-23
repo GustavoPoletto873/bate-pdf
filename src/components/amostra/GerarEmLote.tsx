@@ -1,7 +1,6 @@
 'use client';
 
 import { useMemo, useState, type ReactNode } from 'react';
-import JSZip from 'jszip';
 import { AlertTriangle, Check, CheckCircle2, Download, Layers, Loader2, MinusCircle, Trash2, X } from 'lucide-react';
 import { Aviso, Botao, cx } from '@/components/ui';
 import { ErroApi } from '@/lib/cliente';
@@ -138,6 +137,8 @@ export function GerarEmLote({ fundos, periodoPadrao }: { fundos: FundoAmostra[];
   const baixarZip = async () => {
     setBaixando(true);
     try {
+      // O jszip só é baixado quando alguém pede o .zip (não pesa na abertura da tela).
+      const { default: JSZip } = await import('jszip');
       const zip = new JSZip();
       for (const { fundo } of geradas) {
         const id = situacoesValidas[fundo.id].amostra?.id;
