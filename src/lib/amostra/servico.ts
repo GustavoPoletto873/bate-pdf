@@ -1,6 +1,5 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { db, pastaDeDados, transacao } from '@/lib/db';
+import { apagarPasta, gravarArquivo, lerArquivo } from '@/lib/arquivos';
+import { db, emBlocos, inserirVarios, transacao, type Banco } from '@/lib/db';
 import { ErroDeUso } from '@/lib/api';
 import { digitos } from '@/lib/texto';
 import {
@@ -56,8 +55,9 @@ type LinhaAmostragem = Omit<ResumoAmostragem, 'contagem' | 'avisos'> & {
 const SQL_AMOSTRAGEM = `
   SELECT a.*, f.nome AS fundo, f.cnpj AS cnpj_fundo FROM amostragens a LEFT JOIN fundos f ON f.id = a.fundo_id`;
 
+/** Prefixo (no armazenamento) dos arquivos da amostragem. */
 function pastaDaAmostra(id: number) {
-  return join(pastaDeDados(), 'amostragens', String(id));
+  return `amostragens/${id}`;
 }
 
 /** Converte erro do motor em erro de tela. */
@@ -81,36 +81,39 @@ function resumo(l: LinhaAmostragem): ResumoAmostragem {
   };
 }
 
-function linhaDaAmostragem(id: number): LinhaAmostragem {
+async function linhaDaAmostragem(id: number): Promise<LinhaAmostragem> {
   if (!Number.isInteger(id) || id <= 0) throw new ErroDeUso('Amostra não encontrada.', 404);
-  const l = db().prepare(`${SQL_AMOSTRAGEM} WHERE a.id = ?`).get(id) as LinhaAmostragem | undefined;
+  const l = await (await db()).prepare(`${SQL_AMOSTRAGEM} WHERE a.id = ?`).get<LinhaAmostragem>(id);
   if (!l) throw new ErroDeUso('Amostra não encontrada.', 404);
   return l;
 }
 
-function insumos(id: number): (InsumoAmostragem & { arquivo: string })[] {
-  return db().prepare('SELECT tipo, ordem, nome_arquivo, sha256, tamanho, arquivo FROM amostragem_insumos WHERE amostragem_id = ? ORDER BY tipo, ordem')
-    .all(id) as (InsumoAmostragem & { arquivo: string })[];
+async function insumos(id: number): Promise<(InsumoAmostragem & { arquivo: string })[]> {
+  return (await db()).prepare('SELECT tipo, ordem, nome_arquivo, sha256, tamanho, arquivo FROM amostragem_insumos WHERE amostragem_id = ? ORDER BY tipo, ordem')
+    .all<InsumoAmostragem & { arquivo: string }>(id);
 }
 
-function arquivosDoTipo(id: number, tipo: string): Arquivo[] {
-  return insumos(id).filter((i) => i.tipo === tipo)
-    .map((i) => ({ nome: i.nome_arquivo, conteudo: new Uint8Array(readFileSync(join(pastaDaAmostra(id), i.arquivo))) }));
+async function arquivosDoTipo(id: number, tipo: string): Promise<Arquivo[]> {
+  return Promise.all((await insumos(id)).filter((i) => i.tipo === tipo).map(async (i) => {
+    const conteudo = await lerArquivo(`${pastaDaAmostra(id)}/${i.arquivo}`);
+    if (!conteudo) throw new ErroDeUso(`O arquivo ${i.nome_arquivo} desta amostra não está mais no armazenamento do Lastro.`, 404);
+    return { nome: i.nome_arquivo, conteudo };
+  }));
 }
 
 // ---------------------------------------------------------------------------
 // Fundos
 // ---------------------------------------------------------------------------
 
-export function listarFundos(): FundoAmostra[] {
-  return db().prepare(`
+export async function listarFundos(): Promise<FundoAmostra[]> {
+  return (await db()).prepare(`
     SELECT f.id, f.nome, f.cnpj, f.administradora_id, a.nome AS administradora
       FROM fundos f LEFT JOIN administradoras a ON a.id = f.administradora_id
-     ORDER BY f.nome COLLATE NOCASE`).all() as FundoAmostra[];
+     ORDER BY f.nome COLLATE NOCASE`).all<FundoAmostra>();
 }
 
-function fundo(id: number): FundoAmostra {
-  const f = listarFundos().find((x) => x.id === id);
+async function fundo(id: number): Promise<FundoAmostra> {
+  const f = (await listarFundos()).find((x) => x.id === id);
   if (!f) throw new ErroDeUso('Fundo não encontrado. Cadastre o fundo em Gestão › Fundos.', 404);
   return f;
 }
@@ -124,26 +127,34 @@ function fundo(id: number): FundoAmostra {
  * atendido = vínculo, pré-bate ou já batido no Bate Lastro; lado sem pendência (não conferido na
  * base) conta como atendido. "Base teve bate" = algum lado atendido na base.
  */
-export function linhasDosBatesAnteriores(f: Pick<FundoAmostra, 'id' | 'cnpj'>, inicio: string): LinhaBaseAnterior[] {
-  const c = db();
-  const bases = (c.prepare('SELECT id, fundo_id, cnpj_fundo, data_referencia, criado_em FROM bases WHERE data_referencia IS NOT NULL AND data_referencia < ?')
-    .all(inicio) as { id: string; fundo_id: number | null; cnpj_fundo: string | null; data_referencia: string; criado_em: string }[])
+export async function linhasDosBatesAnteriores(f: Pick<FundoAmostra, 'id' | 'cnpj'>, inicio: string): Promise<LinhaBaseAnterior[]> {
+  const c = await db();
+  const bases = (await c.prepare('SELECT id, fundo_id, cnpj_fundo, data_referencia, criado_em FROM bases WHERE data_referencia IS NOT NULL AND data_referencia < ?')
+    .all<{ id: string; fundo_id: number | null; cnpj_fundo: string | null; data_referencia: string; criado_em: string }>(inicio))
     .filter((b) => b.fundo_id === f.id || (!!b.cnpj_fundo && digitos(b.cnpj_fundo) === f.cnpj));
   const linhas: LinhaBaseAnterior[] = [];
-  const titulosSql = c.prepare(`
-    SELECT t.id, t.nome_fundo, t.cedente_nome, t.cedente_documento, t.sacado_nome, t.sacado_documento, t.numero_documento,
+  // Títulos e "teve bate" de todas as bases em poucas consultas (não duas por base).
+  const titulosPorBase = new Map<string, Record<string, string | number | null>[]>();
+  const teveBate = new Set<string>();
+  for (const bloco of emBlocos(bases.map((b) => b.id))) {
+    const m = bloco.map(() => '?').join(',');
+    for (const t of await c.prepare(`
+    SELECT t.id, t.base_id, t.nome_fundo, t.cedente_nome, t.cedente_documento, t.sacado_nome, t.sacado_documento, t.numero_documento,
            t.tipo_recebivel, t.valor_total, t.valor_aquisicao, t.data_vencimento, t.data_emissao, t.data_aquisicao, t.chave_nfe,
            EXISTS (SELECT 1 FROM pendencias p WHERE p.titulo_id = t.id AND p.lado = 'lastro' AND p.situacao = 'pendente'
                     AND NOT EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.pendencia_id = p.id)) AS pend_lastro,
            EXISTS (SELECT 1 FROM pendencias p WHERE p.titulo_id = t.id AND p.lado = 'termo' AND p.situacao = 'pendente'
                     AND NOT EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.pendencia_id = p.id)) AS pend_termo
-      FROM titulos t WHERE t.base_id = ? ORDER BY t.id`);
-  const teveBateSql = c.prepare(`
-    SELECT EXISTS (SELECT 1 FROM pendencias WHERE base_id = ? AND situacao IN ('vinculado','ja_batido'))
-        OR EXISTS (SELECT 1 FROM pre_matches WHERE base_id = ?) AS teve`);
+      FROM titulos t WHERE t.base_id IN (${m}) ORDER BY t.id`).all<Record<string, string | number | null>>(...bloco)) {
+      const id = String(t.base_id);
+      titulosPorBase.set(id, [...(titulosPorBase.get(id) ?? []), t]);
+    }
+    for (const r of await c.prepare(`SELECT DISTINCT base_id FROM pendencias WHERE base_id IN (${m}) AND situacao IN ('vinculado','ja_batido')
+      UNION SELECT DISTINCT base_id FROM pre_matches WHERE base_id IN (${m})`).all<{ base_id: string }>(...bloco, ...bloco)) teveBate.add(r.base_id);
+  }
   for (const b of bases) {
-    const teve = !!(teveBateSql.get(b.id, b.id) as { teve: number }).teve;
-    for (const t of titulosSql.all(b.id) as Record<string, string | number | null>[]) {
+    const teve = teveBate.has(b.id);
+    for (const t of titulosPorBase.get(b.id) ?? []) {
       linhas.push({
         id: Number(t.id), BASE_ID: b.id, DATA_REFERENCIA: b.data_referencia.slice(0, 10), DATA_CRIACAO: b.criado_em,
         NOME_FUNDO: t.nome_fundo as string | null, NOME_CEDENTE: t.cedente_nome as string | null,
@@ -160,9 +171,9 @@ export function linhasDosBatesAnteriores(f: Pick<FundoAmostra, 'id' | 'cnpj'>, i
   return linhas;
 }
 
-export function pendenciasPlanner(f: FundoAmostra, dataAte: string): Pendencias {
+export async function pendenciasPlanner(f: FundoAmostra, dataAte: string): Promise<Pendencias> {
   const trimestre = inicioTrimestre(dataAte);
-  return pendenciasEmAberto(linhasDosBatesAnteriores(f, trimestre), trimestre);
+  return pendenciasEmAberto(await linhasDosBatesAnteriores(f, trimestre), trimestre);
 }
 
 // ---------------------------------------------------------------------------
@@ -171,20 +182,20 @@ export function pendenciasPlanner(f: FundoAmostra, dataAte: string): Pendencias 
 
 type Conflitante = { id: number; seed: string; data_de: string; data_ate: string };
 
-function conflitantes(fundoId: number, de: string, ate: string, populacaoSha: string, estoquesSha: string[]): Conflitante[] {
+async function conflitantes(c: Banco, fundoId: number, de: string, ate: string, populacaoSha: string, estoquesSha: string[]): Promise<Conflitante[]> {
   const marcas = estoquesSha.map(() => '?').join(',') || "''";
-  return db().prepare(`
+  return c.prepare(`
     SELECT a.id, a.seed, a.data_de, a.data_ate FROM amostragens a
      WHERE a.fundo_id = ? AND a.status = 'GERADA' AND a.data_de <= ? AND a.data_ate >= ?
        AND ((a.data_de = ? AND a.data_ate = ?) OR a.populacao_sha256 = ?
             OR EXISTS (SELECT 1 FROM amostragem_insumos i WHERE i.amostragem_id = a.id AND i.tipo = 'ESTOQUE' AND i.sha256 IN (${marcas})))
-     ORDER BY a.criado_em`).all(fundoId, ate, de, de, ate, populacaoSha, ...estoquesSha) as Conflitante[];
+     ORDER BY a.criado_em`).all<Conflitante>(fundoId, ate, de, de, ate, populacaoSha, ...estoquesSha);
 }
 
 const br = (iso: string) => iso.split('-').reverse().join('/');
 
-function exigirMotivoSeConflita(fundoId: number, de: string, ate: string, popSha: string, estoquesSha: string[], motivo: string) {
-  const lista = conflitantes(fundoId, de, ate, popSha, estoquesSha);
+async function exigirMotivoSeConflita(c: Banco, fundoId: number, de: string, ate: string, popSha: string, estoquesSha: string[], motivo: string) {
+  const lista = await conflitantes(c, fundoId, de, ate, popSha, estoquesSha);
   if (lista.length && !motivo) {
     throw new ErroDeUso(
       `Este fundo já tem amostra valendo com o mesmo estoque e período que se sobrepõe: ${lista.map((c) => `${br(c.data_de)} a ${br(c.data_ate)} (seed ${c.seed})`).join('; ')}. Para sortear de novo, informe o motivo: ela fica registrada como descartada.`,
@@ -212,18 +223,18 @@ const extensao = (nome: string) => (nome.includes('.') ? nome.split('.').pop()!.
 
 /** Sorteia, guarda os arquivos e registra a amostra; devolve o resumo. */
 export async function gerar(p: PedidoAmostra, seed: string = gerarSeed()): Promise<DetalheAmostragem> {
-  const f = fundo(p.fundoId);
+  const f = await fundo(p.fundoId);
   if (p.amostraAnterior && p.amostraAnteriorId) throw new ErroDeUso('Escolha a amostra anterior do histórico ou envie o arquivo, não os dois.');
   const motivo = (p.motivo ?? '').trim();
   let chavesAnteriores: string[] | null = null;
   let anterior: LinhaAmostragem | null = null;
   if (p.amostraAnteriorId) {
-    anterior = linhaDaAmostragem(p.amostraAnteriorId);
+    anterior = await linhaDaAmostragem(p.amostraAnteriorId);
     if (anterior.fundo_id !== p.fundoId) throw new ErroDeUso('A amostra anterior escolhida é de outro fundo.');
     if (anterior.status !== 'GERADA' || anterior.data_ate >= p.dataDe) throw new ErroDeUso('A amostra anterior precisa estar valendo e terminar antes do início do período.');
     chavesAnteriores = (JSON.parse(anterior.manifesto) as Manifesto).selecao.map((s) => s.chave);
   }
-  const pendencias = p.regra === REGRA_PLANNER ? pendenciasPlanner(f, p.dataAte) : null;
+  const pendencias = p.regra === REGRA_PLANNER ? await pendenciasPlanner(f, p.dataAte) : null;
   const liquidados = p.liquidados ?? [];
 
   const r = await semErroDoMotor(() => gerarAmostra({
@@ -235,7 +246,7 @@ export async function gerar(p: PedidoAmostra, seed: string = gerarSeed()): Promi
 
   const estoquesSha = p.estoques.map((a) => sha256(a.conteudo));
   const popSha = r.manifesto.populacao.sha256;
-  exigirMotivoSeConflita(p.fundoId, p.dataDe, p.dataAte, popSha, estoquesSha, motivo);
+  await exigirMotivoSeConflita(await db(), p.fundoId, p.dataDe, p.dataAte, popSha, estoquesSha, motivo);
   const xlsx = await excelDaAmostra(r);
   const m = r.manifesto;
 
@@ -247,14 +258,14 @@ export async function gerar(p: PedidoAmostra, seed: string = gerarSeed()): Promi
 
   let id = 0;
   try {
-    transacao(() => {
-      const lista = exigirMotivoSeConflita(p.fundoId, p.dataDe, p.dataAte, popSha, estoquesSha, motivo);
+    await transacao(async (tx) => {
+      const lista = await exigirMotivoSeConflita(tx, p.fundoId, p.dataDe, p.dataAte, popSha, estoquesSha, motivo);
       const ts = agora();
-      for (const c of lista) {
-        db().prepare("UPDATE amostragens SET status = 'DESCARTADA', motivo_descarte = ?, descartada_em = ? WHERE id = ? AND status = 'GERADA'")
-          .run(`Substituída por nova amostra: ${motivo}`, ts, c.id);
-      }
-      const ins = db().prepare(`
+      await tx.lote(lista.map((c) => ({
+        sql: "UPDATE amostragens SET status = 'DESCARTADA', motivo_descarte = ?, descartada_em = ? WHERE id = ? AND status = 'GERADA'",
+        args: [`Substituída por nova amostra: ${motivo}`, ts, c.id],
+      })));
+      const ins = await tx.prepare(`
         INSERT INTO amostragens (fundo_id, versao, seed, regra, data_de, data_ate, limite_adquiridos, limite_vencidos,
           amostra_anterior_id, populacao_sha256, populacao_titulos, total_titulos, contagem, avisos, manifesto, status, criado_em)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GERADA', ?)`).run(
@@ -263,21 +274,23 @@ export async function gerar(p: PedidoAmostra, seed: string = gerarSeed()): Promi
         JSON.stringify(r.avisos), JSON.stringify(m), ts);
       id = Number(ins.lastInsertRowid);
       const pasta = pastaDaAmostra(id);
-      mkdirSync(join(pasta, 'insumos'), { recursive: true });
-      const insInsumo = db().prepare('INSERT INTO amostragem_insumos (amostragem_id, tipo, ordem, nome_arquivo, sha256, tamanho, arquivo) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      const linhasInsumo: (string | number)[][] = [];
       for (const reg of registros) {
         const sha = sha256(reg.arquivo.conteudo);
         const relativo = `insumos/${sha}.${extensao(reg.arquivo.nome)}`;
-        writeFileSync(join(pasta, relativo), reg.arquivo.conteudo);
-        insInsumo.run(id, reg.tipo, reg.ordem, reg.arquivo.nome, sha, reg.arquivo.conteudo.byteLength, relativo);
+        await gravarArquivo(`${pasta}/${relativo}`, reg.arquivo.conteudo);
+        linhasInsumo.push([id, reg.tipo, reg.ordem, reg.arquivo.nome, sha, reg.arquivo.conteudo.byteLength, relativo]);
       }
-      writeFileSync(join(pasta, 'manifesto.json'), JSON.stringify(m, null, 2));
-      writeFileSync(join(pasta, 'populacao.csv'), r.populacaoCsv);
-      if (r.liquidadosCsv.byteLength) writeFileSync(join(pasta, 'liquidados.csv'), r.liquidadosCsv);
-      writeFileSync(join(pasta, 'amostra.xlsx'), xlsx);
+      await inserirVarios(tx, 'amostragem_insumos', ['amostragem_id', 'tipo', 'ordem', 'nome_arquivo', 'sha256', 'tamanho', 'arquivo'], linhasInsumo);
+      await Promise.all([
+        gravarArquivo(`${pasta}/manifesto.json`, new TextEncoder().encode(JSON.stringify(m, null, 2)), 'application/json'),
+        gravarArquivo(`${pasta}/populacao.csv`, r.populacaoCsv, 'text/csv'),
+        r.liquidadosCsv.byteLength ? gravarArquivo(`${pasta}/liquidados.csv`, r.liquidadosCsv, 'text/csv') : null,
+        gravarArquivo(`${pasta}/amostra.xlsx`, xlsx),
+      ]);
     });
   } catch (e) {
-    if (id) rmSync(pastaDaAmostra(id), { recursive: true, force: true });
+    if (id) await apagarPasta(pastaDaAmostra(id)).catch(() => undefined);
     throw e;
   }
   return obter(id);
@@ -287,29 +300,30 @@ export async function gerar(p: PedidoAmostra, seed: string = gerarSeed()): Promi
 // Consulta, descarte e arquivos
 // ---------------------------------------------------------------------------
 
-export function listar(fundoId?: number | null, limite = 50): ResumoAmostragem[] {
+export async function listar(fundoId?: number | null, limite = 50): Promise<ResumoAmostragem[]> {
+  const c = await db();
   const linhas = fundoId
-    ? db().prepare(`${SQL_AMOSTRAGEM} WHERE a.fundo_id = ? ORDER BY a.criado_em DESC, a.id DESC LIMIT ?`).all(fundoId, limite)
-    : db().prepare(`${SQL_AMOSTRAGEM} ORDER BY a.criado_em DESC, a.id DESC LIMIT ?`).all(limite);
+    ? await c.prepare(`${SQL_AMOSTRAGEM} WHERE a.fundo_id = ? ORDER BY a.criado_em DESC, a.id DESC LIMIT ?`).all(fundoId, limite)
+    : await c.prepare(`${SQL_AMOSTRAGEM} ORDER BY a.criado_em DESC, a.id DESC LIMIT ?`).all(limite);
   return (linhas as LinhaAmostragem[]).map(resumo);
 }
 
 export type DetalheAmostragem = ResumoAmostragem & { populacao_sha256: string | null; insumos: InsumoAmostragem[] };
 
-export function obter(id: number): DetalheAmostragem {
-  const l = linhaDaAmostragem(id);
+export async function obter(id: number): Promise<DetalheAmostragem> {
+  const l = await linhaDaAmostragem(id);
   return {
     ...resumo(l), populacao_sha256: l.populacao_sha256,
-    insumos: insumos(id).map(({ tipo, ordem, nome_arquivo, sha256: sha, tamanho }) => ({ tipo, ordem, nome_arquivo, sha256: sha, tamanho })),
+    insumos: (await insumos(id)).map(({ tipo, ordem, nome_arquivo, sha256: sha, tamanho }) => ({ tipo, ordem, nome_arquivo, sha256: sha, tamanho })),
   };
 }
 
-export function descartar(id: number, motivoInformado: string): DetalheAmostragem {
-  const l = linhaDaAmostragem(id);
+export async function descartar(id: number, motivoInformado: string): Promise<DetalheAmostragem> {
+  const l = await linhaDaAmostragem(id);
   const motivo = (motivoInformado ?? '').trim();
   if (!motivo) throw new ErroDeUso('Informe o motivo do descarte: ele fica registrado no histórico.');
   if (l.status !== 'GERADA') throw new ErroDeUso('Esta amostra já foi descartada.', 409);
-  db().prepare("UPDATE amostragens SET status = 'DESCARTADA', motivo_descarte = ?, descartada_em = ? WHERE id = ? AND status = 'GERADA'")
+  await (await db()).prepare("UPDATE amostragens SET status = 'DESCARTADA', motivo_descarte = ?, descartada_em = ? WHERE id = ? AND status = 'GERADA'")
     .run(motivo, agora(), id);
   return obter(id);
 }
@@ -327,23 +341,19 @@ export const TIPOS_ARQUIVO = {
 
 export async function arquivo(id: number, tipo: string): Promise<{ nome: string; conteudo: Uint8Array; mime: string }> {
   if (tipo !== 'amostra' && tipo !== 'pacote') throw new ErroDeUso('Arquivo desconhecido.', 404);
-  const l = linhaDaAmostragem(id);
-  let conteudo: Uint8Array;
-  try {
-    conteudo = new Uint8Array(readFileSync(join(pastaDaAmostra(id), 'amostra.xlsx')));
-  } catch {
-    throw new ErroDeUso('O arquivo desta amostra não está mais na pasta de dados do Lastro.', 404);
-  }
-  if (tipo === 'pacote') conteudo = await montarPacote(conteudo, arquivosDoTipo(id, 'ESTOQUE'), arquivosDoTipo(id, 'LIQUIDADOS'));
+  const l = await linhaDaAmostragem(id);
+  let conteudo = await lerArquivo(`${pastaDaAmostra(id)}/amostra.xlsx`);
+  if (!conteudo) throw new ErroDeUso('O arquivo desta amostra não está mais no armazenamento do Lastro.', 404);
+  if (tipo === 'pacote') conteudo = await montarPacote(conteudo, await arquivosDoTipo(id, 'ESTOQUE'), await arquivosDoTipo(id, 'LIQUIDADOS'));
   const t = TIPOS_ARQUIVO[tipo];
   return { nome: `${nomeBase(l)}${t.sufixo}${t.extensao}`, conteudo, mime: t.mime };
 }
 
 /** Refaz com os estoques guardados e compara com a registrada. */
 export async function verificar(id: number): Promise<{ identica: boolean; divergencias: string[] }> {
-  const l = linhaDaAmostragem(id);
+  const l = await linhaDaAmostragem(id);
   try {
-    const [, divergencias] = await refazerAmostra(arquivosDoTipo(id, 'ESTOQUE'), JSON.parse(l.manifesto), l.fundo ?? '', arquivosDoTipo(id, 'LIQUIDADOS'));
+    const [, divergencias] = await refazerAmostra(await arquivosDoTipo(id, 'ESTOQUE'), JSON.parse(l.manifesto), l.fundo ?? '', await arquivosDoTipo(id, 'LIQUIDADOS'));
     return { identica: !divergencias.length, divergencias: divergencias.slice(0, 50) };
   } catch (e) {
     if (e instanceof ErroAmostragem) return { identica: false, divergencias: [e.message] };
@@ -361,13 +371,13 @@ function seedValida(seed: string): string {
   }
 }
 
-function porSeed(seed: string): LinhaAmostragem | null {
-  const r = db().prepare('SELECT id FROM amostragens WHERE seed = ? ORDER BY criado_em, id LIMIT 1').get(seed) as { id: number } | undefined;
+async function porSeed(seed: string): Promise<LinhaAmostragem | null> {
+  const r = await (await db()).prepare('SELECT id FROM amostragens WHERE seed = ? ORDER BY criado_em, id LIMIT 1').get<{ id: number }>(seed);
   return r ? linhaDaAmostragem(r.id) : null;
 }
 
-export function buscarPorSeed(seed: string): DetalheAmostragem {
-  const l = porSeed(seedValida(seed));
+export async function buscarPorSeed(seed: string): Promise<DetalheAmostragem> {
+  const l = await porSeed(seedValida(seed));
   if (!l) throw new ErroDeUso('Nenhuma amostra registrada com esta seed.', 404);
   return obter(l.id);
 }
@@ -396,9 +406,9 @@ export async function conferir(seedInformada: string, estoques: Arquivo[], opcoe
 }): Promise<Conferencia> {
   const seed = seedValida(seedInformada);
   if (!estoques.length) throw new ErroDeUso('Envie o estoque usado na amostra.');
-  const l = porSeed(seed);
+  const l = await porSeed(seed);
   if (l) {
-    const registrada = obter(l.id);
+    const registrada = await obter(l.id);
     try {
       const [r, divergencias] = await refazerAmostra(estoques, JSON.parse(l.manifesto), l.fundo ?? '', opcoes.liquidados ?? []);
       return { registrada, confere: !divergencias.length, divergencias: divergencias.slice(0, 50), contagem: r.manifesto.contagem, titulos: titulosDe(r.amostra) };

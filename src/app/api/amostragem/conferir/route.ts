@@ -1,13 +1,14 @@
 import { ErroDeUso, responder } from '@/lib/api';
 import { conferir } from '@/lib/amostra/servico';
 import { arquivosDo, dataDo, inteiroDo, regraDo, textoDo } from '@/lib/amostra/formulario';
+import { lerFormulario } from '@/lib/envio';
 
 export const dynamic = 'force-dynamic';
 
 /** Refaz a amostra de uma seed com o estoque enviado, sem registrar nada (multipart). */
 export async function POST(request: Request) {
   return responder(async () => {
-    const form = await request.formData();
+    const form = await lerFormulario(request);
     const seed = textoDo(form, 'seed');
     if (!seed) throw new ErroDeUso('Digite a seed (12 caracteres).');
     const total = { bytes: 0 };

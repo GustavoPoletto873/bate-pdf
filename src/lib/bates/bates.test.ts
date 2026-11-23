@@ -42,113 +42,113 @@ function criarBase(titulos: TituloImportado[]) {
   });
 }
 
-function leitura(baseId: string, d: Record<string, string | number | null>) {
+async function leitura(baseId: string, d: Record<string, string | number | null>) {
   const cols = Object.keys(d);
-  const r = dbMod.db().prepare(`INSERT INTO leituras (base_id, origem, lida_em, ${cols.join(', ')}) VALUES (?, 'ia', ?, ${cols.map(() => '?').join(', ')})`)
+  const r = await (await dbMod.db()).prepare(`INSERT INTO leituras (base_id, origem, lida_em, ${cols.join(', ')}) VALUES (?, 'ia', ?, ${cols.map(() => '?').join(', ')})`)
     .run(baseId, new Date().toISOString(), ...Object.values(d));
   return Number(r.lastInsertRowid);
 }
 
 describe('painel da Gestão de Bates', () => {
-  test('Leitura Termos/Lastros conta documentos, não linhas', () => {
-    const id = criarBase([titulo('2001', '10.00', '2026-10-10')]);
-    const pdf = repo.registrarPdf(id, { nome_arquivo: 'ccb-parcelas.pdf', caminho_relativo: null, sha256: 'p1', tamanho: 1 });
+  test('Leitura Termos/Lastros conta documentos, não linhas', async () => {
+    const id = await criarBase([titulo('2001', '10.00', '2026-10-10')]);
+    const pdf = await repo.registrarPdf(id, { nome_arquivo: 'ccb-parcelas.pdf', caminho_relativo: null, sha256: 'p1', tamanho: 1 });
     // Uma CCB com 3 parcelas = 3 linhas de leitura, 1 documento.
-    for (const n of ['1', '2', '3']) leitura(id, { pdf_id: pdf.id, tipo_recebivel: 'ccb', numero_documento: `2001-${n}` });
-    leitura(id, { tipo_recebivel: 'termo_cessao', numero_documento: '2001' });
-    expect(pre.painelDaBase(id).leituras).toMatchObject({ termo: 1, lastro: 1, linhas_termo: 1, linhas_lastro: 3 });
+    for (const n of ['1', '2', '3']) await leitura(id, { pdf_id: pdf.id, tipo_recebivel: 'ccb', numero_documento: `2001-${n}` });
+    await leitura(id, { tipo_recebivel: 'termo_cessao', numero_documento: '2001' });
+    expect((await pre.painelDaBase(id)).leituras).toMatchObject({ termo: 1, lastro: 1, linhas_termo: 1, linhas_lastro: 3 });
   });
 });
 
 describe('Processar Base → pré-bates → confirmar/rejeitar', () => {
-  test('fluxo completo da Gestão de Bates', () => {
-    const id = criarBase([titulo('1001', '100.00', '2026-10-10'), titulo('1002', '200.00', '2026-11-10'), titulo('1003', '300.00', '2026-12-10')]);
-    expect(processar.podeProcessar(id)).toEqual({ pode_processar: true, motivo: 'sem_leituras' });
-    const vazio = processar.processarBase(id);
+  test('fluxo completo da Gestão de Bates', async () => {
+    const id = await criarBase([titulo('1001', '100.00', '2026-10-10'), titulo('1002', '200.00', '2026-11-10'), titulo('1003', '300.00', '2026-12-10')]);
+    expect(await processar.podeProcessar(id)).toEqual({ pode_processar: true, motivo: 'sem_leituras' });
+    const vazio = await processar.processarBase(id);
     expect(vazio.quantidade_pre_matches.total).toBe(0);
     expect(vazio.aviso).toMatch(/Não há documentos de leitura/);
 
-    const pdf = repo.registrarPdf(id, { nome_arquivo: 'ccb-1001.pdf', caminho_relativo: null, sha256: 'x1', tamanho: 1 });
-    const l1 = leitura(id, { pdf_id: pdf.id, tipo_recebivel: 'ccb', numero_documento: '1001', valor_nominal: '100.00', data_vencimento: '2026-10-10',
+    const pdf = await repo.registrarPdf(id, { nome_arquivo: 'ccb-1001.pdf', caminho_relativo: null, sha256: 'x1', tamanho: 1 });
+    const l1 = await leitura(id, { pdf_id: pdf.id, tipo_recebivel: 'ccb', numero_documento: '1001', valor_nominal: '100.00', data_vencimento: '2026-10-10',
       sacado_documento: '12345678909', cedente_documento: '11222333000181', sacado_nome: 'JOAO DA SILVA', cedente_nome: 'EMPRESA FICTICIA LTDA', data_emissao: '2026-08-02' });
-    const l2 = leitura(id, { tipo_recebivel: 'termo_cessao', numero_documento: '1002', valor_nominal: '200.00', data_vencimento: '2026-11-10' });
-    leitura(id, { tipo_recebivel: 'ccb', numero_documento: '1002', valor_nominal: '200.00', data_vencimento: '2026-11-11' });
-    const orfa = leitura(id, { tipo_recebivel: 'ccb', numero_documento: '9999', valor_nominal: '1.00' });
-    expect(processar.podeProcessar(id).motivo).toBe('leitura_nova');
+    const l2 = await leitura(id, { tipo_recebivel: 'termo_cessao', numero_documento: '1002', valor_nominal: '200.00', data_vencimento: '2026-11-10' });
+    await leitura(id, { tipo_recebivel: 'ccb', numero_documento: '1002', valor_nominal: '200.00', data_vencimento: '2026-11-11' });
+    const orfa = await leitura(id, { tipo_recebivel: 'ccb', numero_documento: '9999', valor_nominal: '1.00' });
+    expect((await processar.podeProcessar(id)).motivo).toBe('leitura_nova');
 
-    const r = processar.processarBase(id);
+    const r = await processar.processarBase(id);
     expect(r.aviso).toBeNull();
     expect(r.quantidade_pre_matches).toEqual({ total: 3, termo: 1, lastro: 2 });
     expect(r.quantidade_registro_base).toEqual({ total: 6, termo: 3, lastro: 3 });
     expect(r.quantidade_pendencias).toEqual({ total: 3, termo: 2, lastro: 1 });
 
     // A órfã continua livre: o botão segue liberado (como lá).
-    expect(processar.podeProcessar(id).pode_processar).toBe(true);
+    expect((await processar.podeProcessar(id)).pode_processar).toBe(true);
     // Reprocessar não duplica.
-    expect(processar.processarBase(id).quantidade_pre_matches.total).toBe(0);
+    expect((await processar.processarBase(id)).quantidade_pre_matches.total).toBe(0);
 
-    const painel = pre.painelDaBase(id);
+    const painel = await pre.painelDaBase(id);
     expect(painel).toMatchObject({ total_pre_matches: 3, total_registros: 3, pendentes: { termo: 2, lastro: 1 }, leituras: { termo: 1, lastro: 3, orfas: 1 } });
 
-    const lista = pre.listarPreBates(id, { tipo: 'lastro' });
+    const lista = await pre.listarPreBates(id, { tipo: 'lastro' });
     expect(lista.total).toBe(2);
     expect(lista.por_tipo).toEqual({ todos: 3, termo: 1, lastro: 2 });
     const doL1 = lista.itens.find((i) => i.leitura.id === l1)!;
     expect(doL1).toMatchObject({ criterio: 1, similaridade: 1, tipo_validacao: 'LASTRO' });
     expect(doL1.confiabilidade.percentual).toBe(100);
     expect(doL1.campos!.find((c) => c.campo === 'data_emissao')!.veredito).toBe('D');
-    expect(pre.listarPreBates(id, { tipo: 'lastro', confiabilidade: [100] }).ids).toEqual([doL1.pre_match_id]);
+    expect((await pre.listarPreBates(id, { tipo: 'lastro', confiabilidade: [100] })).ids).toEqual([doL1.pre_match_id]);
 
     // Confirmar: vira vínculo automático com a leitura e o PDF dela.
-    expect(pre.confirmarPreBates(id, [doL1.pre_match_id])).toEqual({ confirmados: 1, descartados: 0 });
-    const linha = repo.listarPendencias(id).find((p) => p.vinculo?.leitura_id === l1)!;
+    expect(await pre.confirmarPreBates(id, [doL1.pre_match_id])).toEqual({ confirmados: 1, descartados: 0 });
+    const linha = (await repo.listarPendencias(id)).find((p) => p.vinculo?.leitura_id === l1)!;
     expect(linha).toMatchObject({ situacao: 'vinculado', lado: 'lastro' });
     expect(linha.vinculo).toMatchObject({ tipo_match: 'automatico', pdf_id: pdf.id, origem: 'pre_bate', similaridade: 1 });
     expect(linha.vinculo!.marcacoes).toMatchObject({ numero_documento: 'V', valor_total: 'V', data_emissao: 'D' });
 
     // Rejeitar: some o pré-bate, a pendência fica aberta e a leitura órfã.
-    const termo = pre.listarPreBates(id, { tipo: 'termo' }).itens[0];
+    const termo = (await pre.listarPreBates(id, { tipo: 'termo' })).itens[0];
     expect(termo.leitura.id).toBe(l2);
-    expect(pre.rejeitarPreBates(id, [termo.pre_match_id])).toEqual({ rejeitados: 1 });
-    const abertas = pre.pendenciasEOrfas(id);
+    expect(await pre.rejeitarPreBates(id, [termo.pre_match_id])).toEqual({ rejeitados: 1 });
+    const abertas = await pre.pendenciasEOrfas(id);
     expect(abertas.total_pendencias).toEqual({ termo: 3, lastro: 1 });
     expect(abertas.orfas.map((o) => o.id).sort()).toEqual([l2, orfa].sort());
 
     // Resultados: V = vínculo ou pré-bate; P = nenhum.
-    const linhas = res.linhasDeResultado(id);
+    const linhas = await res.linhasDeResultado(id);
     const est = res.estatisticas(linhas);
     expect(est.lastro).toMatchObject({ total: 3, total_v: 2, total_p: 1 });
     expect(est.termo).toMatchObject({ total: 3, total_v: 0 });
     expect(est.origem_v).toMatchObject({ automatico: 1, pre_bate: 1 });
     expect(res.filtrarResultados(linhas, { status: 'V', texto: '1002' }).total).toBe(1);
 
-    repo.excluirBase(id);
+    await repo.excluirBase(id);
   });
 });
 
 describe('Bater PDF grava a leitura do vínculo', () => {
-  test('vincular cria leitura bater_pdf e descarta o pré-bate; desfazer apaga a leitura', () => {
-    const id = criarBase([titulo('2001', '150.00', '2026-10-10')]);
-    leitura(id, { tipo_recebivel: 'ccb', numero_documento: '2001', valor_nominal: '150.00', data_vencimento: '2026-10-10' });
-    processar.processarBase(id);
-    const p = repo.listarPendencias(id).find((x) => x.lado === 'lastro')!;
+  test('vincular cria leitura bater_pdf e descarta o pré-bate; desfazer apaga a leitura', async () => {
+    const id = await criarBase([titulo('2001', '150.00', '2026-10-10')]);
+    await leitura(id, { tipo_recebivel: 'ccb', numero_documento: '2001', valor_nominal: '150.00', data_vencimento: '2026-10-10' });
+    await processar.processarBase(id);
+    const p = (await repo.listarPendencias(id)).find((x) => x.lado === 'lastro')!;
     expect(p.pre_bate).toMatchObject({ numero_documento: '2001', criterio: 5 });
 
-    const pdf = repo.registrarPdf(id, { nome_arquivo: 'doc.pdf', caminho_relativo: null, sha256: 'y', tamanho: 1 });
+    const pdf = await repo.registrarPdf(id, { nome_arquivo: 'doc.pdf', caminho_relativo: null, sha256: 'y', tamanho: 1 });
     const campos = ['numero_documento', 'sacado_nome', 'sacado_documento', 'cedente_nome', 'cedente_documento', 'valor_total', 'data_vencimento'] as const;
-    repo.salvarMarcacoes(id, [
+    await repo.salvarMarcacoes(id, [
       ...campos.map((campo) => ({ pendencia_id: p.pendencia_id, campo, valor: 'V' as const })),
       { pendencia_id: p.pendencia_id, campo: 'data_emissao', valor: 'D', valor_digitado: '2026-08-05' },
     ]);
-    expect(repo.vincular(id, [{ pendencia_id: p.pendencia_id, pdf_id: pdf.id, pagina: 2 }]).vinculados).toBe(1);
-    const depois = repo.listarPendencias(id).find((x) => x.pendencia_id === p.pendencia_id)!;
+    expect((await repo.vincular(id, [{ pendencia_id: p.pendencia_id, pdf_id: pdf.id, pagina: 2 }])).vinculados).toBe(1);
+    const depois = (await repo.listarPendencias(id)).find((x) => x.pendencia_id === p.pendencia_id)!;
     expect(depois.pre_bate).toBeNull();
-    const l = dbMod.db().prepare('SELECT * FROM leituras WHERE id = ?').get(depois.vinculo!.leitura_id!) as Record<string, unknown>;
+    const l = await (await dbMod.db()).prepare('SELECT * FROM leituras WHERE id = ?').get(depois.vinculo!.leitura_id!);
     expect(l).toMatchObject({ origem: 'bater_pdf', pdf_id: pdf.id, numero_documento: '2001', valor_nominal: '150.00', data_emissao: '2026-08-05', tipo_recebivel: 'CCB' });
 
-    repo.desvincular(id, [p.pendencia_id]);
-    expect(dbMod.db().prepare('SELECT COUNT(*) n FROM leituras WHERE origem = ? AND base_id = ?').get('bater_pdf', id)).toEqual({ n: 0 });
-    repo.excluirBase(id);
+    await repo.desvincular(id, [p.pendencia_id]);
+    expect(await (await dbMod.db()).prepare('SELECT COUNT(*) n FROM leituras WHERE origem = ? AND base_id = ?').get('bater_pdf', id)).toEqual({ n: 0 });
+    await repo.excluirBase(id);
   });
 });
 
@@ -160,11 +160,11 @@ describe('exportação e Inserir Resultado', () => {
   }
 
   test('exporta vínculo, pré-bate e pendente; a planilha volta pelo Inserir Resultado', async () => {
-    const id = criarBase([titulo('3001', '100.00', '2026-10-10', 501), titulo('3002', '200.00', '2026-11-10', 502), titulo('3003', '300.00', '2026-12-10', 503)]);
-    leitura(id, { tipo_recebivel: 'ccb', numero_documento: '3002', valor_nominal: '200.00', data_vencimento: '2026-11-10' });
-    processar.processarBase(id);
+    const id = await criarBase([titulo('3001', '100.00', '2026-10-10', 501), titulo('3002', '200.00', '2026-11-10', 502), titulo('3003', '300.00', '2026-12-10', 503)]);
+    await leitura(id, { tipo_recebivel: 'ccb', numero_documento: '3002', valor_nominal: '200.00', data_vencimento: '2026-11-10' });
+    await processar.processarBase(id);
 
-    const linhas = res.linhasDaExportacao(id);
+    const linhas = await res.linhasDaExportacao(id);
     expect(linhas).toHaveLength(6);
     const bytes = await exp.gerarPlanilhaResultados(linhas, { nome: 'Teste', cnpj: CNPJ, geradoEm: new Date(), nomeFundo: 'FIDC EXEMPLO', dataReferencia: '2026-09-30' });
     const livro = await abrir(bytes);
@@ -199,22 +199,22 @@ describe('exportação e Inserir Resultado', () => {
     const nome = exp.nomeDoArquivo(CNPJ);
 
     // Outro fundo é recusado.
-    const outra = criarBase([titulo('3001', '100.00', '2026-10-10')]);
-    dbMod.db().prepare("UPDATE titulos SET cnpj_fundo = '99999999000199' WHERE base_id = ?").run(outra);
-    dbMod.db().prepare("UPDATE bases SET cnpj_fundo = '99999999000199' WHERE id = ?").run(outra);
+    const outra = await criarBase([titulo('3001', '100.00', '2026-10-10')]);
+    await (await dbMod.db()).prepare("UPDATE titulos SET cnpj_fundo = '99999999000199' WHERE base_id = ?").run(outra);
+    await (await dbMod.db()).prepare("UPDATE bases SET cnpj_fundo = '99999999000199' WHERE id = ?").run(outra);
     await expect(ins.inserirResultado(outra, editada, nome, true)).rejects.toThrow(/outro fundo/);
-    repo.excluirBase(outra);
+    await repo.excluirBase(outra);
 
     const previa = await ins.inserirResultado(id, editada, nome, true);
     expect(previa.simulado).toBe(true);
     expect(previa.casos.lastro).toMatchObject({ bate_criado: 1, pre_bate_confirmado: 1 });
     expect(previa.total_a_gravar).toBe(2);
     // A prévia não grava nada.
-    expect(res.estatisticas(res.linhasDeResultado(id)).origem_v).toMatchObject({ manual: 0, pre_bate: 1 });
+    expect(res.estatisticas(await res.linhasDeResultado(id)).origem_v).toMatchObject({ manual: 0, pre_bate: 1 });
 
     const gravado = await ins.inserirResultado(id, editada, nome, false);
     expect(gravado.total_a_gravar).toBe(2);
-    const depois = res.linhasDeResultado(id).filter((l) => l.lado === 'lastro');
+    const depois = (await res.linhasDeResultado(id)).filter((l) => l.lado === 'lastro');
     const r501 = depois.find((l) => l.titulo.id_base_origem === 501)!;
     expect(r501).toMatchObject({ status: 'V', origem: 'vinculo', origem_vinculo: 'planilha', tipo_match: 'manual' });
     expect(r501.vereditos).toMatchObject({ sacado_nome: 'D', numero_documento: 'V', valor_total: 'V', data_emissao: 'P' });
@@ -228,7 +228,7 @@ describe('exportação e Inserir Resultado', () => {
     expect(denovo.casos.lastro.ja_batido_igual).toBe(2);
 
     // Pendências: 3003 sem Lastro e os 3 sem Termo.
-    const p = res.pendenciasParaExportar(id);
+    const p = await res.pendenciasParaExportar(id);
     expect(p.faltantes.map((f) => `${f.lado}:${f.titulo.numero_documento}`)).toEqual(['lastro:3003', 'termo:3001', 'termo:3002', 'termo:3003']);
     expect(p.consolidadas).toHaveLength(3);
     const l1 = await abrir(await pend.planilhaPendencias({ nome_fundo: 'FIDC EXEMPLO', cnpj_fundo: CNPJ, data_referencia: '2026-09-30' }, p.faltantes));
@@ -240,7 +240,7 @@ describe('exportação e Inserir Resultado', () => {
     expect(l2.getWorksheet('LASTRO E TERMO')!.getCell('B4').value).toBe('P');
     expect(pend.nomeDoArquivoPendencias({ nome_fundo: 'FIDC EXEMPLO', cnpj_fundo: CNPJ, data_referencia: '2026-09-30' }, new Date('2026-11-18T13:00:00Z')))
       .toBe('Pendencias_FIDC EXEMPLO_12345678000195_3T2026_2026-11-18_10-00-00.xlsx');
-    repo.excluirBase(id);
+    await repo.excluirBase(id);
   });
 
   test('conversões do importador', () => {

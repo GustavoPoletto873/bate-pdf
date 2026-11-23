@@ -1,7 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { gravarArquivo, lerArquivo } from '@/lib/arquivos';
 import JSZip from 'jszip';
-import { pastaDeDados } from '@/lib/db';
 import { ErroDeUso } from '@/lib/api';
 
 /**
@@ -125,9 +123,9 @@ export function lerCsv(texto: string): Linha[] {
 export type Baixar = (url: string) => Promise<Response>;
 
 async function zipDaCompetencia(comp: string, baixar: Baixar, forcar: boolean): Promise<Uint8Array> {
-  const pasta = join(/*turbopackIgnore: true*/ pastaDeDados(), 'cvm');
-  const arquivo = join(pasta, `inf_mensal_fidc_${comp}.zip`);
-  if (!forcar && existsSync(arquivo)) return new Uint8Array(readFileSync(arquivo));
+  const arquivo = `cvm/inf_mensal_fidc_${comp}.zip`;
+  const guardado = forcar ? null : await lerArquivo(arquivo);
+  if (guardado) return guardado;
   let r: Response;
   try {
     r = await baixar(URL_INFORME(comp));
@@ -137,8 +135,7 @@ async function zipDaCompetencia(comp: string, baixar: Baixar, forcar: boolean): 
   if (r.status === 404) throw new InformeIndisponivel(`A CVM ainda não publicou o informe mensal da competência ${comp.slice(4)}/${comp.slice(0, 4)}.`);
   if (!r.ok) throw new InformeIndisponivel(`Informe mensal ${comp} indisponível na CVM (HTTP ${r.status}).`);
   const bytes = new Uint8Array(await r.arrayBuffer());
-  mkdirSync(pasta, { recursive: true });
-  writeFileSync(arquivo, bytes);
+  await gravarArquivo(arquivo, bytes, 'application/zip');
   return bytes;
 }
 

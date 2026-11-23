@@ -9,11 +9,11 @@ export const dynamic = 'force-dynamic';
 export async function GET(request: Request, ctx: RouteContext<'/api/bases/[id]/exportar-pendencias'>) {
   return responder(async () => {
     const { id } = await ctx.params;
-    const base = obterBase(id);
+    const base = await obterBase(id);
     if (!base) throw new ErroDeUso('Base não encontrada.', 404);
     const layout = new URL(request.url).searchParams.get('layout') ?? '1';
     if (layout !== '1' && layout !== '2') throw new ErroDeUso('Layout inválido. Selecione o layout 1 ou 2.');
-    const p = pendenciasParaExportar(id);
+    const p = await pendenciasParaExportar(id);
     const primeiro = p.consolidadas[0]?.titulo;
     const fundo = {
       nome_fundo: base.nome_fundo ?? primeiro?.nome_fundo ?? null,

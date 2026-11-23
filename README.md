@@ -21,7 +21,7 @@ Bater PDF) **→ Resultados** (exporta `resultados_matching_<CNPJ>_<data_hora>.x
 
 ## Como rodar
 
-Precisa do **Node.js 24** (ou 22.13+; o app usa o SQLite embutido do Node).
+Precisa do **Node.js 24** (ou 22.13+). O banco é SQLite via libSQL (`@libsql/client`).
 
 ```bash
 npm install
@@ -32,6 +32,34 @@ Para uso no dia a dia, sem modo de desenvolvimento: `npm run build` e depois `np
 
 Os dados ficam em `./data` (banco `bate-pdf.db` e `pdfs/<base>/<sha256>.pdf`). Para usar outra pasta (ex.: um disco
 com mais espaço), defina `BATE_PDF_DADOS=C:\caminho\da\pasta` antes de iniciar. A pasta `data/` não vai para o Git.
+
+## Versão na nuvem (Vercel)
+
+O mesmo código roda nos dois modos; quem escolhe são as variáveis de ambiente (modelo em `.env.example`):
+
+| | Local (padrão) | Nuvem |
+|---|---|---|
+| Banco | arquivo `data/bate-pdf.db` | Turso (`TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`) |
+| PDFs e arquivos | pasta `data/` | Vercel Blob privado (`BLOB_READ_WRITE_TOKEN`) |
+| Login | nenhum | Google, só `@denvercontabil.com.br` (`AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`) |
+| Indexação dos PDFs | processo à parte (`scripts/indexador.ts`) | no servidor, depois da resposta; retomada quando a base é aberta |
+| Fila de leitura (Gemini) | contínua no servidor | por requisição; retomada quando o lote é acompanhado |
+| Envio de arquivos | direto para a rota | navegador → Blob (sem o limite de 4,5 MB da Vercel) → rota |
+
+Antes do primeiro deploy com dados reais: confirmar a liberação interna para guardar dados dos fundos na nuvem.
+
+Passo a passo (as contas e chaves são criadas por quem administra; nunca vão para o Git):
+
+1. **Turso**: criar o banco (`turso db create lastro`), pegar a URL (`turso db show lastro --url`) e um token
+   (`turso db tokens create lastro`). O esquema é criado sozinho na primeira requisição.
+2. **Google OAuth** (Google Cloud Console, projeto da empresa): tela de consentimento *Interno* e um ID do cliente
+   OAuth do tipo *Aplicativo da Web*, com o redirecionamento `https://<domínio-do-app>/api/auth/callback/google`.
+3. **Vercel**: importar o repositório; em *Storage*, criar um **Blob privado** e ligá-lo ao projeto (cria o
+   `BLOB_READ_WRITE_TOKEN`); cadastrar as demais variáveis (`npx auth secret` gera o `AUTH_SECRET`) e fazer o deploy.
+   O `vercel.json` dá 300 s às rotas da API (indexação e leitura por IA rodam depois da resposta).
+
+Limites conhecidos na nuvem: a consulta de NF Status mostra o progresso só quando a página cai na mesma instância
+que iniciou a consulta (a consulta em si termina); a indexação de muitos PDFs grandes anda em rodadas de ~3 min.
 
 ## Fluxo
 

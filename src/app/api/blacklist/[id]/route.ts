@@ -8,7 +8,7 @@ export async function DELETE(_request: Request, ctx: RouteContext<'/api/blacklis
   return responder(async () => {
     const id = Number((await ctx.params).id);
     if (!Number.isInteger(id)) throw new ErroDeUso('Entrada não encontrada.', 404);
-    remover(id);
+    await remover(id);
     return Response.json({ ok: true });
   });
 }

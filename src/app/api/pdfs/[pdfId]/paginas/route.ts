@@ -6,6 +6,6 @@ export async function GET(request: Request, ctx: RouteContext<'/api/pdfs/[pdfId]
   return responder(async () => {
     const { pdfId } = await ctx.params;
     const q = new URL(request.url).searchParams.get('q') ?? '';
-    return Response.json({ paginas: paginasComTermo(Number(pdfId), q) });
+    return Response.json({ paginas: await paginasComTermo(Number(pdfId), q) });
   });
 }

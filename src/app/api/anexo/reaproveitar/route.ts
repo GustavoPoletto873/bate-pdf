@@ -8,6 +8,6 @@ export async function POST(request: Request) {
   return responder(async () => {
     const corpo = await lerJson<{ origem?: string; destino?: string }>(request);
     if (!corpo.origem || !corpo.destino) throw new ErroDeUso('Selecione as bases de origem e de destino.');
-    return Response.json({ copiadas: reaproveitarLeituras(corpo.origem, corpo.destino) });
+    return Response.json({ copiadas: await reaproveitarLeituras(corpo.origem, corpo.destino) });
   });
 }

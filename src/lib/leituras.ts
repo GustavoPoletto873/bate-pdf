@@ -1,4 +1,4 @@
-import { db, transacao } from '@/lib/db';
+import { db, inserirVarios, reservarIds, transacao, type Banco, excluir } from '@/lib/db';
 import { lerData, lerMoeda } from '@/lib/valores';
 
 /**
@@ -95,18 +95,24 @@ export function normalizarLeitura(l: NovaLeitura): Record<(typeof COLUNAS)[numbe
   };
 }
 
-function inserirSemTransacao(baseId: string, linhas: NovaLeitura[]): number[] {
-  const st = db().prepare(`INSERT INTO leituras (base_id, ${COLUNAS.join(', ')}) VALUES (?, ${COLUNAS.map(() => '?').join(', ')})`);
-  return linhas.map((l) => {
+async function inserirNa(tx: Banco, baseId: string, linhas: NovaLeitura[]): Promise<number[]> {
+  // Ids reservados: todas as linhas num lote só (no Turso, uma ida por linha seria lenta).
+  const primeiro = await reservarIds(tx, 'leituras', linhas.length);
+  const ids = linhas.map((_, k) => primeiro + k);
+  await inserirVarios(tx, 'leituras', ['id', 'base_id', ...COLUNAS], linhas.map((l, k) => {
     const n = normalizarLeitura(l);
-    return Number(st.run(baseId, ...COLUNAS.map((c) => n[c])).lastInsertRowid);
-  });
+    return [ids[k], baseId, ...COLUNAS.map((c) => n[c])];
+  }));
+  return ids;
 }
 
-/** Grava as leituras na base (uma transação). Devolve os ids criados. */
-export function inserirLeituras(baseId: string, linhas: NovaLeitura[], opcoes: { emTransacao?: boolean } = {}): number[] {
+/**
+ * Grava as leituras na base e devolve os ids criados. Com `tx`, grava dentro dessa transação;
+ * senão abre uma.
+ */
+export async function inserirLeituras(baseId: string, linhas: NovaLeitura[], opcoes: { tx?: Banco } = {}): Promise<number[]> {
   if (!linhas.length) return [];
-  return opcoes.emTransacao === false ? inserirSemTransacao(baseId, linhas) : transacao(() => inserirSemTransacao(baseId, linhas));
+  return opcoes.tx ? inserirNa(opcoes.tx, baseId, linhas) : transacao((tx) => inserirNa(tx, baseId, linhas));
 }
 
 export type FiltroLeituras = {
@@ -119,7 +125,7 @@ export type FiltroLeituras = {
 };
 
 /** Leituras de uma base (ordem de gravação). */
-export function listarLeituras(baseId: string, filtros: FiltroLeituras = {}): Leitura[] {
+export async function listarLeituras(baseId: string, filtros: FiltroLeituras = {}): Promise<Leitura[]> {
   const onde = ['base_id = ?'];
   const args: (string | number)[] = [baseId];
   if (filtros.documentoId !== undefined) { onde.push('documento_id = ?'); args.push(filtros.documentoId); }
@@ -128,11 +134,11 @@ export function listarLeituras(baseId: string, filtros: FiltroLeituras = {}): Le
   if (filtros.origem !== undefined) { onde.push('origem = ?'); args.push(filtros.origem); }
   if (filtros.lado === 'termo') onde.push("COALESCE(tipo_recebivel, '') LIKE 'termo_cessao%'");
   if (filtros.lado === 'lastro') onde.push("COALESCE(tipo_recebivel, '') NOT LIKE 'termo_cessao%'");
-  return db().prepare(`SELECT * FROM leituras WHERE ${onde.join(' AND ')} ORDER BY id`).all(...args) as Leitura[];
+  return (await db()).prepare(`SELECT * FROM leituras WHERE ${onde.join(' AND ')} ORDER BY id`).all<Leitura>(...args);
 }
 
-export function obterLeitura(id: number): Leitura | null {
-  return (db().prepare('SELECT * FROM leituras WHERE id = ?').get(id) as Leitura | undefined) ?? null;
+export async function obterLeitura(id: number): Promise<Leitura | null> {
+  return (await (await db()).prepare('SELECT * FROM leituras WHERE id = ?').get<Leitura>(id)) ?? null;
 }
 
 /** Lado da leitura, como no Bate Lastro: TIPO_RECEBIVEL 'termo_cessao…' = Termo. */
@@ -140,7 +146,7 @@ export function ladoDaLeitura(l: Pick<Leitura, 'tipo_recebivel'>): 'termo' | 'la
   return (l.tipo_recebivel ?? '').startsWith('termo_cessao') ? 'termo' : 'lastro';
 }
 
-/** Apaga as leituras de um documento (antes de gravar a nova leitura dele). */
-export function apagarLeiturasDoDocumento(documentoId: number): void {
-  db().prepare('DELETE FROM leituras WHERE documento_id = ?').run(documentoId);
+/** Apaga as leituras de um documento (antes de gravar a nova leitura dele). Com `tx`, dentro dela. */
+export async function apagarLeiturasDoDocumento(documentoId: number, tx?: Banco): Promise<void> {
+  await excluir(tx ?? (await db()), 'leituras', 'documento_id = ?', [documentoId]);
 }

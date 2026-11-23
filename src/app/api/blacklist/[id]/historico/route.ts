@@ -8,6 +8,6 @@ export async function GET(_request: Request, ctx: RouteContext<'/api/blacklist/[
   return responder(async () => {
     const id = Number((await ctx.params).id);
     if (!Number.isInteger(id)) throw new ErroDeUso('Entrada não encontrada.', 404);
-    return Response.json(historico(id));
+    return Response.json(await historico(id));
   });
 }

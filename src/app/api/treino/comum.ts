@@ -1,4 +1,5 @@
 import { ErroDeUso } from '@/lib/api';
+import { lerFormulario } from '@/lib/envio';
 
 export type FormularioTipo = { config: unknown; amostra: Uint8Array | null; versao: number | null; documentoId: number | null; tipoId: number | null };
 
@@ -6,7 +7,7 @@ export type FormularioTipo = { config: unknown; amostra: Uint8Array | null; vers
 export async function lerFormularioTipo(request: Request): Promise<FormularioTipo> {
   let form: FormData;
   try {
-    form = await request.formData();
+    form = await lerFormulario(request);
   } catch {
     throw new ErroDeUso('Envie o formulário do tipo (config e PDF de exemplo).');
   }

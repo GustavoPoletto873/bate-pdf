@@ -13,9 +13,9 @@ async function idDe(ctx: { params: Promise<{ id: string }> }) {
 export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   return responder(async () => {
     const id = await idDe(ctx);
-    const fundo = obterFundo(id);
+    const fundo = await obterFundo(id);
     if (!fundo) throw new ErroDeUso('Fundo não encontrado. Atualize a lista.', 404);
-    return Response.json({ fundo, uso: usoDoFundo(id) });
+    return Response.json({ fundo, uso: await usoDoFundo(id) });
   });
 }
 
@@ -23,13 +23,13 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
   return responder(async () => {
     const id = await idDe(ctx);
     const dados = await lerJson<Partial<Omit<DadosFundo, 'cnpj'>>>(request);
-    return Response.json({ fundo: atualizarFundo(id, dados) });
+    return Response.json({ fundo: await atualizarFundo(id, dados) });
   });
 }
 
 export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   return responder(async () => {
-    excluirFundo(await idDe(ctx));
+    await excluirFundo(await idDe(ctx));
     return Response.json({ ok: true });
   });
 }

@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(_request: Request, ctx: RouteContext<'/api/relatorios/emissoes/[id]'>) {
   return responder(async () => {
-    const { nome, conteudo } = arquivoDaEmissao((await ctx.params).id);
+    const { nome, conteudo } = await arquivoDaEmissao((await ctx.params).id);
     return new Response(new Uint8Array(conteudo), {
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',

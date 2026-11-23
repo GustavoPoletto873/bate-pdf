@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { gravarArquivo } from '@/lib/arquivos';
 import { ErroDeUso } from '@/lib/api';
-import { db, pastaDeDados, transacao } from '@/lib/db';
+import { db, emBlocos, reservarIds, transacao, type Valor } from '@/lib/db';
 import { receberPdfsComIds, type PdfRecebido } from '@/lib/indexacao';
 import { listarLeituras, type Leitura } from '@/lib/leituras';
 import {
@@ -48,34 +47,54 @@ export function intervaloReferencia(data: string, modo: 'TRIMESTRE' | 'DATA_REFE
   return [inicio, fim];
 }
 
-function detalharBase(b: Omit<BaseDoAnexo, 'titulos' | 'leituras' | 'documentos' | 'previa'>): BaseDoAnexo {
-  const c = db();
-  const n = (sql: string) => (c.prepare(sql).get(b.id) as { n: number }).n;
-  return {
-    ...b,
-    titulos: n('SELECT COUNT(*) n FROM titulos WHERE base_id = ?'),
-    leituras: n('SELECT COUNT(*) n FROM leituras WHERE base_id = ?'),
-    documentos: n('SELECT COUNT(*) n FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id WHERE l.base_id = ?'),
-    previa: c.prepare(`SELECT numero_documento, sacado_nome, sacado_documento, cedente_nome, cedente_documento, valor_total
-      FROM titulos WHERE base_id = ? ORDER BY id LIMIT 5`).all(b.id) as BaseDoAnexo['previa'],
-  };
-}
-
 type BaseCrua = Omit<BaseDoAnexo, 'titulos' | 'leituras' | 'documentos' | 'previa'>;
+
+/** Contagens e prévia de várias bases com consultas agregadas (não quatro consultas por base). */
+async function detalharBases(bases: BaseCrua[]): Promise<BaseDoAnexo[]> {
+  if (!bases.length) return [];
+  const c = await db();
+  const titulos = new Map<string, number>();
+  const leituras = new Map<string, number>();
+  const documentos = new Map<string, number>();
+  const previas = new Map<string, BaseDoAnexo['previa']>();
+  for (const bloco of emBlocos(bases.map((b) => b.id), 200)) {
+    const m = bloco.map(() => '?').join(',');
+    for (const r of await c.prepare(`SELECT base_id, COUNT(*) n FROM titulos WHERE base_id IN (${m}) GROUP BY base_id`).all<{ base_id: string; n: number }>(...bloco)) titulos.set(r.base_id, r.n);
+    for (const r of await c.prepare(`SELECT base_id, COUNT(*) n FROM leituras WHERE base_id IN (${m}) GROUP BY base_id`).all<{ base_id: string; n: number }>(...bloco)) leituras.set(r.base_id, r.n);
+    for (const r of await c.prepare(`SELECT l.base_id, COUNT(*) n FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id
+        WHERE l.base_id IN (${m}) GROUP BY l.base_id`).all<{ base_id: string; n: number }>(...bloco)) documentos.set(r.base_id, r.n);
+    // Os 5 primeiros títulos de cada base.
+    for (const r of await c.prepare(`SELECT base_id, numero_documento, sacado_nome, sacado_documento, cedente_nome, cedente_documento, valor_total
+        FROM (SELECT t.*, ROW_NUMBER() OVER (PARTITION BY base_id ORDER BY id) AS ordem FROM titulos t WHERE base_id IN (${m}))
+        WHERE ordem <= 5 ORDER BY base_id, ordem`).all<BaseDoAnexo['previa'][number] & { base_id: string }>(...bloco)) {
+      const { base_id, ...titulo } = r;
+      const lista = previas.get(base_id) ?? [];
+      lista.push(titulo);
+      previas.set(base_id, lista);
+    }
+  }
+  return bases.map((b) => ({
+    ...b,
+    titulos: titulos.get(b.id) ?? 0,
+    leituras: leituras.get(b.id) ?? 0,
+    documentos: documentos.get(b.id) ?? 0,
+    previa: previas.get(b.id) ?? [],
+  }));
+}
 
 const SELECT_BASE = 'SELECT id, nome, nome_fundo, cnpj_fundo, data_referencia, modo_referencia, fundo_id FROM bases';
 
 /** Bases de um fundo no período (Buscar Operações), ou todas, ou uma (por id). */
-export function buscarBases(f: { id?: string; fundoId?: number; data?: string; modo?: 'TRIMESTRE' | 'DATA_REFERENCIA' }): BaseDoAnexo[] {
-  const c = db();
+export async function buscarBases(f: { id?: string; fundoId?: number; data?: string; modo?: 'TRIMESTRE' | 'DATA_REFERENCIA' }): Promise<BaseDoAnexo[]> {
+  const c = await db();
   if (f.id) {
-    const b = c.prepare(`${SELECT_BASE} WHERE id = ?`).get(f.id) as unknown as BaseCrua | undefined;
-    return b ? [detalharBase(b)] : [];
+    const b = await c.prepare(`${SELECT_BASE} WHERE id = ?`).get<BaseCrua>(f.id);
+    return b ? detalharBases([b]) : [];
   }
   const onde: string[] = [];
   const args: (string | number)[] = [];
   if (f.fundoId) {
-    const fundo = c.prepare('SELECT cnpj FROM fundos WHERE id = ?').get(f.fundoId) as { cnpj: string } | undefined;
+    const fundo = await c.prepare('SELECT cnpj FROM fundos WHERE id = ?').get<{ cnpj: string }>(f.fundoId);
     if (!fundo) throw new ErroDeUso('Fundo não encontrado.', 404);
     onde.push("(fundo_id = ? OR REPLACE(REPLACE(REPLACE(COALESCE(cnpj_fundo, ''), '.', ''), '/', ''), '-', '') = ?)");
     args.push(f.fundoId, fundo.cnpj);
@@ -87,18 +106,19 @@ export function buscarBases(f: { id?: string; fundoId?: number; data?: string; m
     args.push(ini, fim);
   }
   const sql = `${SELECT_BASE}${onde.length ? ` WHERE ${onde.join(' AND ')}` : ''} ORDER BY data_referencia DESC, criado_em DESC LIMIT 200`;
-  return (c.prepare(sql).all(...args) as unknown as BaseCrua[]).map(detalharBase);
+  return detalharBases(await c.prepare(sql).all<BaseCrua>(...args));
 }
 
 // ---------------------------------------------------------------------------
 // Etapa 3: lote, arquivos, documentos e jobs
 // ---------------------------------------------------------------------------
 
-export function criarLote(baseId: string, agrupar: boolean): string {
-  const base = db().prepare('SELECT id, fundo_id FROM bases WHERE id = ?').get(baseId) as { id: string; fundo_id: number | null } | undefined;
+export async function criarLote(baseId: string, agrupar: boolean): Promise<string> {
+  const c = await db();
+  const base = await c.prepare('SELECT id, fundo_id FROM bases WHERE id = ?').get<{ id: string; fundo_id: number | null }>(baseId);
   if (!base) throw new ErroDeUso('Base não encontrada.', 404);
   const id = randomUUID();
-  db().prepare('INSERT INTO anexo_lotes (id, base_id, fundo_id, agrupar_por_pasta, total_documentos, criado_em) VALUES (?, ?, ?, ?, 0, ?)')
+  await c.prepare('INSERT INTO anexo_lotes (id, base_id, fundo_id, agrupar_por_pasta, total_documentos, criado_em) VALUES (?, ?, ?, ?, 0, ?)')
     .run(id, baseId, base.fundo_id, agrupar ? 1 : 0, agora());
   return id;
 }
@@ -110,15 +130,15 @@ type Lote = { id: string; base_id: string; agrupar_por_pasta: number; total_docu
 
 type Preparado = { caminho: string; origem: string; ext: string; bytes: Uint8Array; operacao: { chave: string; nome: string | null; pasta: string | null } };
 
-function obterLoteBruto(loteId: string): Lote {
-  const lote = db().prepare('SELECT id, base_id, agrupar_por_pasta, total_documentos, total_bytes FROM anexo_lotes WHERE id = ?').get(loteId) as Lote | undefined;
+async function obterLoteBruto(loteId: string): Promise<Lote> {
+  const lote = await (await db()).prepare('SELECT id, base_id, agrupar_por_pasta, total_documentos, total_bytes FROM anexo_lotes WHERE id = ?').get<Lote>(loteId);
   if (!lote || !lote.base_id) throw new ErroDeUso('Lote não encontrado.', 404);
   return lote;
 }
 
 /** Recebe uma leva de arquivos do lote: abre ZIPs, confere caminhos e limites, grava e enfileira. */
 export async function adicionarArquivos(loteId: string, arquivos: ArquivoEnviado[]): Promise<{ documentos: number; recusados: Recusado[] }> {
-  const lote = obterLoteBruto(loteId);
+  const lote = await obterLoteBruto(loteId);
   const agrupar = lote.agrupar_por_pasta === 1;
   const recusados: Recusado[] = [];
   const candidatos: { caminho: string; origem: string; bytes: Uint8Array }[] = [];
@@ -152,7 +172,7 @@ export async function adicionarArquivos(loteId: string, arquivos: ArquivoEnviado
   }
 
   // Repetidos no lote (mesmo caminho, sem diferenciar maiúsculas) e limites do lote.
-  const existentes = new Set((db().prepare('SELECT LOWER(caminho) c FROM anexo_documentos WHERE lote_id = ?').all(loteId) as { c: string }[]).map((r) => r.c));
+  const existentes = new Set((await (await db()).prepare('SELECT LOWER(caminho) c FROM anexo_documentos WHERE lote_id = ?').all<{ c: string }>(loteId)).map((r) => r.c));
   let total = lote.total_documentos;
   let bytes = lote.total_bytes;
   const preparados: Preparado[] = [];
@@ -189,7 +209,7 @@ export async function adicionarArquivos(loteId: string, arquivos: ArquivoEnviado
     const nome = nomeDoArquivo(p.caminho);
     return { nome: extensao(nome) === '.pdf' ? nome : `${nome.replace(/\.[^.]+$/, '')}.pdf`, caminhoRelativo: p.caminho, bytes: p.bytes };
   });
-  const gravados = recebidos.length ? receberPdfsComIds(lote.base_id, recebidos) : [];
+  const gravados = recebidos.length ? await receberPdfsComIds(lote.base_id, recebidos) : [];
   const pdfDe = new Map<Preparado, number>();
   pdfs.forEach((p, i) => {
     const g = gravados[i];
@@ -198,32 +218,43 @@ export async function adicionarArquivos(loteId: string, arquivos: ArquivoEnviado
   });
 
   const aceitos = preparados.filter((p) => p.ext !== '.pdf' || pdfDe.has(p));
-  const pastaXml = join(pastaDeDados(), 'anexos', loteId);
   const momento = agora();
-  transacao(() => {
-    const c = db();
-    const acharOp = c.prepare('SELECT id FROM anexo_operacoes WHERE lote_id = ? AND chave = ?');
-    const criarOp = c.prepare('INSERT INTO anexo_operacoes (id, lote_id, chave, nome, caminho) VALUES (?, ?, ?, ?, ?)');
-    const criarDoc = c.prepare(`INSERT INTO anexo_documentos (lote_id, operacao_id, pdf_id, caminho, nome_arquivo, extensao, status, origem, tamanho, arquivo, criado_em, atualizado_em)
-      VALUES (?, ?, ?, ?, ?, ?, 'enfileirado', ?, ?, ?, ?, ?)`);
-    const criarJob = c.prepare("INSERT INTO jobs (tipo, base_id, documento_id, status, criado_em, atualizado_em) VALUES ('leitura_lastro', ?, ?, 'pending', ?, ?)");
+  // XMLs vão para o disco antes da transação (a transação só grava as linhas).
+  const arquivoDe = new Map<Preparado, string>();
+  for (const p of aceitos) {
+    if (p.ext !== '.xml') continue;
+    const arquivo = `anexos/${loteId}/${randomUUID()}.xml`;
+    await gravarArquivo(arquivo, p.bytes, 'application/xml');
+    arquivoDe.set(p, arquivo);
+  }
+  await transacao(async (tx) => {
+    const ops = new Map((await tx.prepare('SELECT chave, id FROM anexo_operacoes WHERE lote_id = ?').all<{ chave: string; id: string }>(loteId)).map((r) => [r.chave, r.id]));
+    // Ids dos documentos reservados: operação, documento e job de cada arquivo vão num lote só.
+    let docId = await reservarIds(tx, 'anexo_documentos', aceitos.length);
+    const comandos: { sql: string; args: Valor[] }[] = [];
     for (const p of aceitos) {
-      let op = (acharOp.get(loteId, p.operacao.chave) as { id: string } | undefined)?.id;
+      let op = ops.get(p.operacao.chave);
       if (!op) {
         op = randomUUID();
-        criarOp.run(op, loteId, p.operacao.chave, p.operacao.nome, p.operacao.pasta);
+        ops.set(p.operacao.chave, op);
+        comandos.push({ sql: 'INSERT INTO anexo_operacoes (id, lote_id, chave, nome, caminho) VALUES (?, ?, ?, ?, ?)', args: [op, loteId, p.operacao.chave, p.operacao.nome, p.operacao.pasta] });
       }
-      let arquivo: string | null = null;
-      if (p.ext === '.xml') {
-        mkdirSync(pastaXml, { recursive: true });
-        arquivo = join('anexos', loteId, `${randomUUID()}.xml`);
-        writeFileSync(join(/*turbopackIgnore: true*/ pastaDeDados(), arquivo), p.bytes);
-      }
-      const r = criarDoc.run(loteId, op, pdfDe.get(p) ?? null, p.caminho, nomeDoArquivo(p.caminho), extensao(p.caminho), p.origem, p.bytes.length, arquivo, momento, momento);
-      criarJob.run(lote.base_id, Number(r.lastInsertRowid), momento, momento);
+      comandos.push({
+        sql: `INSERT INTO anexo_documentos (id, lote_id, operacao_id, pdf_id, caminho, nome_arquivo, extensao, status, origem, tamanho, arquivo, criado_em, atualizado_em)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'enfileirado', ?, ?, ?, ?, ?)`,
+        args: [docId, loteId, op, pdfDe.get(p) ?? null, p.caminho, nomeDoArquivo(p.caminho), extensao(p.caminho), p.origem, p.bytes.length, arquivoDe.get(p) ?? null, momento, momento],
+      });
+      comandos.push({
+        sql: "INSERT INTO jobs (tipo, base_id, documento_id, status, criado_em, atualizado_em) VALUES ('leitura_lastro', ?, ?, 'pending', ?, ?)",
+        args: [lote.base_id, docId, momento, momento],
+      });
+      docId++;
     }
-    c.prepare('UPDATE anexo_lotes SET total_documentos = total_documentos + ?, total_bytes = total_bytes + ? WHERE id = ?')
-      .run(aceitos.length, aceitos.reduce((s, p) => s + p.bytes.length, 0), loteId);
+    comandos.push({
+      sql: 'UPDATE anexo_lotes SET total_documentos = total_documentos + ?, total_bytes = total_bytes + ? WHERE id = ?',
+      args: [aceitos.length, aceitos.reduce((s, p) => s + p.bytes.length, 0), loteId],
+    });
+    for (const bloco of emBlocos(comandos, 200)) await tx.lote(bloco);
   });
   if (aceitos.length) chutarFila();
   return { documentos: aceitos.length, recusados };
@@ -251,46 +282,50 @@ export type DocumentoDoLote = {
 
 export const STATUS_FINAIS = ['lido', 'somente_classificado', 'erro'];
 
-export function documentosDoLote(loteId: string): DocumentoDoLote[] {
-  return db().prepare(`SELECT d.id, d.caminho, d.nome_arquivo, d.origem, d.operacao_id, COALESCE(o.nome, NULL) AS operacao, d.pdf_id, d.status,
+export async function documentosDoLote(loteId: string): Promise<DocumentoDoLote[]> {
+  return (await db()).prepare(`SELECT d.id, d.caminho, d.nome_arquivo, d.origem, d.operacao_id, COALESCE(o.nome, NULL) AS operacao, d.pdf_id, d.status,
       d.tipo_documento, d.motivo, d.paginas, (SELECT COUNT(*) FROM leituras l WHERE l.documento_id = d.id) AS leituras, d.atualizado_em
     FROM anexo_documentos d LEFT JOIN anexo_operacoes o ON o.id = d.operacao_id
-    WHERE d.lote_id = ? ORDER BY d.caminho COLLATE NOCASE`).all(loteId) as DocumentoDoLote[];
+    WHERE d.lote_id = ? ORDER BY d.caminho COLLATE NOCASE`).all<DocumentoDoLote>(loteId);
 }
 
-export function obterLote(loteId: string): {
+export async function obterLote(loteId: string): Promise<{
   lote: { id: string; base_id: string; agrupar_por_pasta: boolean; total_documentos: number; criado_em: string };
   documentos: DocumentoDoLote[];
   leituras: Leitura[];
   resumo: Record<string, number>;
-} {
-  const lote = db().prepare('SELECT id, base_id, agrupar_por_pasta, total_documentos, criado_em FROM anexo_lotes WHERE id = ?').get(loteId) as
-    { id: string; base_id: string; agrupar_por_pasta: number; total_documentos: number; criado_em: string } | undefined;
+}> {
+  const lote = await (await db()).prepare('SELECT id, base_id, agrupar_por_pasta, total_documentos, criado_em FROM anexo_lotes WHERE id = ?')
+    .get<{ id: string; base_id: string; agrupar_por_pasta: number; total_documentos: number; criado_em: string }>(loteId);
   if (!lote) throw new ErroDeUso('Lote não encontrado.', 404);
-  const documentos = documentosDoLote(loteId);
+  const documentos = await documentosDoLote(loteId);
   const ids = new Set(documentos.map((d) => d.id));
-  const leituras = listarLeituras(lote.base_id).filter((l) => l.documento_id !== null && ids.has(l.documento_id));
+  const leituras = (await listarLeituras(lote.base_id)).filter((l) => l.documento_id !== null && ids.has(l.documento_id));
   const resumo: Record<string, number> = {};
   for (const d of documentos) resumo[d.status] = (resumo[d.status] ?? 0) + 1;
   return { lote: { ...lote, agrupar_por_pasta: lote.agrupar_por_pasta === 1 }, documentos, leituras, resumo };
 }
 
 /** "Tentar de novo": documentos com erro voltam para a fila (cada tentativa é cobrada de novo). */
-export function tentarDeNovo(documentoIds: number[], situacoes: string[] = ['erro']): number {
+export async function tentarDeNovo(documentoIds: number[], situacoes: string[] = ['erro']): Promise<number> {
   if (!documentoIds.length) return 0;
   const momento = agora();
-  const n = transacao(() => {
-    const c = db();
+  const n = await transacao(async (tx) => {
     let total = 0;
-    for (const id of documentoIds) {
-      const doc = c.prepare(`SELECT d.id, l.base_id FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id
-        WHERE d.id = ? AND d.status IN (${situacoes.map(() => '?').join(',')})`).get(id, ...situacoes) as { id: number; base_id: string } | undefined;
-      if (!doc) continue;
-      c.prepare("UPDATE anexo_documentos SET status = 'enfileirado', motivo = NULL, atualizado_em = ? WHERE id = ?").run(momento, id);
-      const job = c.prepare('SELECT id FROM jobs WHERE documento_id = ? ORDER BY id DESC LIMIT 1').get(id) as { id: number } | undefined;
-      if (job) c.prepare("UPDATE jobs SET status = 'pending', erro = NULL, atualizado_em = ? WHERE id = ?").run(momento, job.id);
-      else c.prepare("INSERT INTO jobs (tipo, base_id, documento_id, status, criado_em, atualizado_em) VALUES ('leitura_lastro', ?, ?, 'pending', ?, ?)").run(doc.base_id, id, momento, momento);
-      total++;
+    for (const bloco of emBlocos([...new Set(documentoIds)])) {
+      const m = bloco.map(() => '?').join(',');
+      const docs = await tx.prepare(`SELECT d.id, l.base_id, (SELECT MAX(j.id) FROM jobs j WHERE j.documento_id = d.id) AS job_id
+        FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id
+        WHERE d.id IN (${m}) AND d.status IN (${situacoes.map(() => '?').join(',')})`)
+        .all<{ id: number; base_id: string; job_id: number | null }>(...bloco, ...situacoes);
+      const comandos: { sql: string; args: Valor[] }[] = [];
+      for (const doc of docs) {
+        comandos.push({ sql: "UPDATE anexo_documentos SET status = 'enfileirado', motivo = NULL, atualizado_em = ? WHERE id = ?", args: [momento, doc.id] });
+        if (doc.job_id) comandos.push({ sql: "UPDATE jobs SET status = 'pending', erro = NULL, atualizado_em = ? WHERE id = ?", args: [momento, doc.job_id] });
+        else comandos.push({ sql: "INSERT INTO jobs (tipo, base_id, documento_id, status, criado_em, atualizado_em) VALUES ('leitura_lastro', ?, ?, 'pending', ?, ?)", args: [doc.base_id, doc.id, momento, momento] });
+      }
+      await tx.lote(comandos);
+      total += docs.length;
     }
     return total;
   });
@@ -299,14 +334,14 @@ export function tentarDeNovo(documentoIds: number[], situacoes: string[] = ['err
 }
 
 /** "Ler de novo" depois de treinar um tipo: vale também para o que só foi classificado. */
-export function lerDeNovo(documentoIds: number[]): number {
+export async function lerDeNovo(documentoIds: number[]): Promise<number> {
   return tentarDeNovo(documentoIds, ['erro', 'somente_classificado']);
 }
 
 /** Ids dos documentos com erro de uma base (Tentar todos de novo). */
-export function documentosComErro(baseId: string): number[] {
-  return (db().prepare(`SELECT d.id FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id
-    WHERE l.base_id = ? AND d.status = 'erro'`).all(baseId) as { id: number }[]).map((r) => r.id);
+export async function documentosComErro(baseId: string): Promise<number[]> {
+  return (await (await db()).prepare(`SELECT d.id FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id
+    WHERE l.base_id = ? AND d.status = 'erro'`).all<{ id: number }>(baseId)).map((r) => r.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -320,10 +355,10 @@ const CHAVE_TITULO = ['numero_documento', 'numero_parcela', 'data_vencimento', '
  * Copia para `destino` as leituras de `origem` (mesmo fundo), sem as da planilha e sem
  * repetir título que o destino já tem. A cópia entra com lida_em = agora.
  */
-export function reaproveitarLeituras(origem: string, destino: string): number {
+export async function reaproveitarLeituras(origem: string, destino: string): Promise<number> {
   if (origem === destino) throw new ErroDeUso('As bases de origem e destino não podem ser as mesmas.');
-  const c = db();
-  const bases = c.prepare('SELECT id, fundo_id, cnpj_fundo FROM bases WHERE id IN (?, ?)').all(origem, destino) as { id: string; fundo_id: number | null; cnpj_fundo: string | null }[];
+  const c = await db();
+  const bases = await c.prepare('SELECT id, fundo_id, cnpj_fundo FROM bases WHERE id IN (?, ?)').all<{ id: string; fundo_id: number | null; cnpj_fundo: string | null }>(origem, destino);
   const o = bases.find((b) => b.id === origem);
   const d = bases.find((b) => b.id === destino);
   if (!o || !d) throw new ErroDeUso('Base não encontrada.', 404);
@@ -334,13 +369,14 @@ export function reaproveitarLeituras(origem: string, destino: string): number {
     'cedente_nome', 'cedente_documento', 'cessionario_nome', 'cessionario_documento', 'valor_nominal', 'data_aquisicao', 'data_emissao',
     'data_vencimento', 'numero_parcela', 'quantidade_parcelas', 'ente_consignante', 'origem', 'dados'];
   const igual = CHAVE_TITULO.map((k) => `d.${k} IS o.${k}`).join(' AND ');
-  return transacao(() => {
-    const r = c.prepare(`INSERT INTO leituras (base_id, ${colunas.join(', ')}, lida_em)
+  // Um comando só (INSERT … SELECT): já é atômico, não precisa de transação.
+  {
+    const r = await c.prepare(`INSERT INTO leituras (base_id, ${colunas.join(', ')}, lida_em)
       SELECT ?, ${colunas.map((k) => (k === 'documento_id' ? 'NULL' : `o.${k}`)).join(', ')}, ?
       FROM leituras o
       WHERE o.base_id = ? AND o.origem <> 'planilha'
         AND o.id = (SELECT MAX(o2.id) FROM leituras o2 WHERE o2.base_id = o.base_id AND ${CHAVE_TITULO.map((k) => `o2.${k} IS o.${k}`).join(' AND ')})
         AND NOT EXISTS (SELECT 1 FROM leituras d WHERE d.base_id = ? AND ${igual})`).run(destino, agora(), origem, destino);
     return Number(r.changes);
-  });
+  }
 }

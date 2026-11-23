@@ -9,6 +9,6 @@ export async function POST(request: Request, ctx: RouteContext<'/api/amostragem/
   return responder(async () => {
     const { id } = await ctx.params;
     const { motivo } = await lerJson<{ motivo?: string }>(request);
-    return Response.json(descartar(idDaRota(id), motivo ?? ''));
+    return Response.json(await descartar(idDaRota(id), motivo ?? ''));
   });
 }

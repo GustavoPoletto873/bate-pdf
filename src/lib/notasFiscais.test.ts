@@ -36,23 +36,23 @@ describe('NF Status', () => {
     expect(nf.chaveConsultavel(chave(1))).toBe(true);
   });
 
-  test('registra, filtra, e o XML relido não desfaz a consulta do SERPRO', () => {
-    const id = base([]);
-    nf.registrarNota({ chave_nfe: chave(1), base_id: id, status_nfe: 'Ativa', origem: 'xml_anexo', xml_content: '<a/>' });
-    nf.registrarNota({ chave_nfe: chave(2), base_id: id, status_nfe: 'Cancelada', origem: 'serpro', xml_content: '<b/>' });
-    nf.registrarNota({ chave_nfe: chave(2), base_id: id, status_nfe: 'Ativa', origem: 'xml_anexo', xml_content: '<c/>' });
-    const todas = nf.listarNotas({ baseId: id });
+  test('registra, filtra, e o XML relido não desfaz a consulta do SERPRO', async () => {
+    const id = await base([]);
+    await nf.registrarNota({ chave_nfe: chave(1), base_id: id, status_nfe: 'Ativa', origem: 'xml_anexo', xml_content: '<a/>' });
+    await nf.registrarNota({ chave_nfe: chave(2), base_id: id, status_nfe: 'Cancelada', origem: 'serpro', xml_content: '<b/>' });
+    await nf.registrarNota({ chave_nfe: chave(2), base_id: id, status_nfe: 'Ativa', origem: 'xml_anexo', xml_content: '<c/>' });
+    const todas = await nf.listarNotas({ baseId: id });
     expect(todas.resumo).toMatchObject({ total: 2, ativas: 1, canceladas: 1 });
-    expect(nf.listarNotas({ baseId: id, status: 'cancelada' }).dados.map((n) => n.chave_nfe)).toEqual([chave(2)]);
-    expect(nf.listarNotas({ chave: chave(1).slice(-10) }).dados).toHaveLength(1);
+    expect((await nf.listarNotas({ baseId: id, status: 'cancelada' })).dados.map((n) => n.chave_nfe)).toEqual([chave(2)]);
+    expect((await nf.listarNotas({ chave: chave(1).slice(-10) })).dados).toHaveLength(1);
     const n2 = todas.dados.find((n) => n.chave_nfe === chave(2))!;
-    expect(nf.xmlDaNota(n2.id).xml).toBe('<b/>');
+    expect((await nf.xmlDaNota(n2.id)).xml).toBe('<b/>');
   });
 
   test('consulta no SERPRO: token, uma chamada por chave, sem vazar a credencial', async () => {
     process.env.SERPRO_CONSUMER_KEY = 'chave-ficticia';
     process.env.SERPRO_SECRET_KEY = 'segredo-ficticio';
-    const id = base([chave(11), chave(12), chave(13), '0001']);
+    const id = await base([chave(11), chave(12), chave(13), '0001']);
     const buscar = vi.fn(async (url: string | URL | Request) => {
       const u = String(url);
       if (u.endsWith('/token')) return Response.json({ access_token: 'tok' });
@@ -60,11 +60,11 @@ describe('NF Status', () => {
       if (u.endsWith(chave(12))) return new Response('<cStat>101</cStat>');
       return new Response('falhou segredo-ficticio', { status: 500 });
     });
-    const p = nf.iniciarConsulta(id, buscar as unknown as typeof fetch);
+    const p = await nf.iniciarConsulta(id, buscar as unknown as typeof fetch);
     expect(p.total).toBe(3);
     await vi.waitFor(() => expect(nf.progressoConsulta(id)?.terminou).toBe(true));
     expect(nf.progressoConsulta(id)).toMatchObject({ feitas: 3, ativas: 1, canceladas: 1, erros: 1 });
-    const erro = nf.listarNotas({ baseId: id, status: 'erro' }).dados[0];
+    const erro = (await nf.listarNotas({ baseId: id, status: 'erro' })).dados[0];
     expect(erro.mensagem).toContain('***');
     expect(erro.mensagem).not.toContain('segredo-ficticio');
     expect(buscar).toHaveBeenCalledTimes(4);
@@ -72,8 +72,8 @@ describe('NF Status', () => {
     delete process.env.SERPRO_SECRET_KEY;
   });
 
-  test('sem credenciais, a consulta é recusada com o que fazer', () => {
-    const id = base([chave(21)]);
-    expect(() => nf.iniciarConsulta(id)).toThrow(/SERPRO_CONSUMER_KEY/);
+  test('sem credenciais, a consulta é recusada com o que fazer', async () => {
+    const id = await base([chave(21)]);
+    await expect(nf.iniciarConsulta(id)).rejects.toThrow(/SERPRO_CONSUMER_KEY/);
   });
 });

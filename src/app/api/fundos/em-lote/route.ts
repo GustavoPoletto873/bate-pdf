@@ -7,6 +7,6 @@ export const dynamic = 'force-dynamic';
 export async function PUT(request: Request) {
   return responder(async () => {
     const { ids, ...dados } = await lerJson<{ ids: number[]; administradora_id?: number | null; gestor?: string | null }>(request);
-    return Response.json({ atualizados: atualizarEmLote(Array.isArray(ids) ? ids : [], dados) });
+    return Response.json({ atualizados: await atualizarEmLote(Array.isArray(ids) ? ids : [], dados) });
   });
 }

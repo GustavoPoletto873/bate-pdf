@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { gravarArquivo, lerArquivo } from '@/lib/arquivos';
 import { join } from 'node:path';
 import JSZip from 'jszip';
-import { db, pastaDeDados } from '@/lib/db';
+import { db, emBlocos, type Valor } from '@/lib/db';
 import { ErroDeUso } from '@/lib/api';
 import { formatarCpfCnpj } from '@/lib/texto';
 import { renderizar, marcadoresDoModelo } from './docx';
@@ -69,34 +70,46 @@ function intervaloDoTrimestre(dataBase: string): [string, string] {
 
 type LinhaFundo = { id: number; nome: string; cnpj: string; tipo: 'FIDC' | 'FIC_FIDC'; adm_id: number | null; adm_nome: string | null; razao_social: string | null; endereco: string | null; endereco_complemento: string | null };
 
-function fundos(ids?: number[]): Fundo[] {
+async function fundos(ids?: number[]): Promise<Fundo[]> {
   const filtro = ids ? `WHERE f.id IN (${ids.map(() => '?').join(',') || 'NULL'})` : '';
-  return (db().prepare(`SELECT f.id, f.nome, f.cnpj, f.tipo, a.id AS adm_id, a.nome AS adm_nome, a.razao_social, a.endereco, a.endereco_complemento
-      FROM fundos f LEFT JOIN administradoras a ON a.id = f.administradora_id ${filtro} ORDER BY f.nome COLLATE NOCASE`).all(...(ids ?? [])) as LinhaFundo[])
+  return ((await (await db()).prepare(`SELECT f.id, f.nome, f.cnpj, f.tipo, a.id AS adm_id, a.nome AS adm_nome, a.razao_social, a.endereco, a.endereco_complemento
+      FROM fundos f LEFT JOIN administradoras a ON a.id = f.administradora_id ${filtro} ORDER BY f.nome COLLATE NOCASE`).all(...(ids ?? []))) as LinhaFundo[])
     .map((f) => ({
       id: f.id, nome: f.nome, cnpj: f.cnpj, tipo: f.tipo,
       administrador: { id: f.adm_id, nome: f.adm_nome, razao_social: f.razao_social, endereco: f.endereco, endereco_complemento: f.endereco_complemento },
     }));
 }
 
-function fundo(id: number): Fundo {
-  const [f] = fundos([id]);
+async function fundo(id: number): Promise<Fundo> {
+  const [f] = await fundos([id]);
   if (!f) throw new ErroDeUso('Fundo não encontrado.', 404);
   return f;
 }
 
 /** Base de auditoria do trimestre da data-base (a mais recente); sem base no trimestre = sem movimentação. */
-export function baseDoTrimestre(f: Pick<Fundo, 'id' | 'cnpj'>, dataBase: string): { id: string; nome: string } | null {
-  const [de, ate] = intervaloDoTrimestre(dataBase);
-  return (db().prepare(`SELECT id, nome FROM bases
-     WHERE (fundo_id = ? OR replace(replace(replace(COALESCE(cnpj_fundo, ''), '.', ''), '/', ''), '-', '') = ?)
-       AND substr(data_referencia, 1, 10) BETWEEN ? AND ?
-     ORDER BY criado_em DESC LIMIT 1`).get(f.id, f.cnpj, de, ate) as { id: string; nome: string } | undefined) ?? null;
+export async function baseDoTrimestre(f: Pick<Fundo, 'id' | 'cnpj'>, dataBase: string): Promise<{ id: string; nome: string } | null> {
+  return (await basesDoTrimestre([f], dataBase)).get(f.id) ?? null;
 }
 
-function carteiraEmCache(fundoId: number, dataBase: string): Carteira | null {
-  const r = db().prepare('SELECT dados FROM relatorio_carteiras WHERE fundo_id = ? AND data_base = ?').get(fundoId, dataBase) as { dados: string } | undefined;
-  return r ? (JSON.parse(r.dados) as Carteira) : null;
+/** A base mais recente do trimestre de cada fundo, numa consulta só. */
+async function basesDoTrimestre(lista: Pick<Fundo, 'id' | 'cnpj'>[], dataBase: string): Promise<Map<number, { id: string; nome: string }>> {
+  const [de, ate] = intervaloDoTrimestre(dataBase);
+  const linhas = await (await db()).prepare(`SELECT id, nome, fundo_id,
+       replace(replace(replace(COALESCE(cnpj_fundo, ''), '.', ''), '/', ''), '-', '') AS cnpj
+     FROM bases WHERE substr(data_referencia, 1, 10) BETWEEN ? AND ? ORDER BY criado_em DESC`)
+    .all<{ id: string; nome: string; fundo_id: number | null; cnpj: string }>(de, ate);
+  const saida = new Map<number, { id: string; nome: string }>();
+  for (const f of lista) {
+    const b = linhas.find((l) => l.fundo_id === f.id || l.cnpj === f.cnpj);
+    if (b) saida.set(f.id, { id: b.id, nome: b.nome });
+  }
+  return saida;
+}
+
+/** Carteiras em cache na data-base (de todos os fundos, ou dos informados). */
+async function carteirasEmCache(dataBase: string): Promise<Map<number, Carteira>> {
+  const linhas = await (await db()).prepare('SELECT fundo_id, dados FROM relatorio_carteiras WHERE data_base = ?').all<{ fundo_id: number; dados: string }>(dataBase);
+  return new Map(linhas.map((r) => [r.fundo_id, JSON.parse(r.dados) as Carteira]));
 }
 
 /**
@@ -105,27 +118,30 @@ function carteiraEmCache(fundoId: number, dataBase: string): Carteira | null {
  */
 export async function coletarCarteirasPara(lista: Fundo[], dataBase: string, opcoes: { forcar?: boolean; baixar?: Baixar } = {}): Promise<Map<number, Carteira | null>> {
   const saida = new Map<number, Carteira | null>();
+  const cache = opcoes.forcar ? new Map<number, Carteira>() : await carteirasEmCache(dataBase);
   const faltam = lista.filter((f) => {
-    const c = opcoes.forcar ? null : carteiraEmCache(f.id, dataBase);
+    const c = cache.get(f.id) ?? null;
     if (c) saida.set(f.id, c);
     return !c;
   });
   if (faltam.length) {
     const tabelas = await baixarInforme(dataBase, opcoes.baixar, opcoes.forcar);
     const carteiras = coletarCarteiras(dataBase, faltam.map((f) => formatarCpfCnpj(f.cnpj)), tabelas);
-    const gravar = db().prepare(`INSERT INTO relatorio_carteiras (fundo_id, data_base, dados, coletado_em) VALUES (?, ?, ?, ?)
-      ON CONFLICT (fundo_id, data_base) DO UPDATE SET dados = excluded.dados, coletado_em = excluded.coletado_em`);
+    const sql = `INSERT INTO relatorio_carteiras (fundo_id, data_base, dados, coletado_em) VALUES (?, ?, ?, ?)
+      ON CONFLICT (fundo_id, data_base) DO UPDATE SET dados = excluded.dados, coletado_em = excluded.coletado_em`;
+    const comandos: { sql: string; args: Valor[] }[] = [];
     for (const f of faltam) {
       const c = carteiras.get(formatarCpfCnpj(f.cnpj)) ?? null;
       saida.set(f.id, c);
-      if (c) gravar.run(f.id, dataBase, JSON.stringify(c), agora());
+      if (c) comandos.push({ sql, args: [f.id, dataBase, JSON.stringify(c), agora()] });
     }
+    for (const bloco of emBlocos(comandos, 200)) await (await db()).lote(bloco);
   }
   return saida;
 }
 
 export async function coletarTodas(dataBase: string, forcar = false, baixar?: Baixar) {
-  const lista = fundos();
+  const lista = await fundos();
   if (!lista.length) throw new ErroDeUso('Cadastre os fundos em Gestão › Fundos antes de coletar as carteiras.');
   const r = await coletarCarteirasPara(lista, dataBase, { forcar, baixar });
   const comCarteira = [...r.values()].filter(Boolean).length;
@@ -146,16 +162,26 @@ export type FundoParaEmissao = {
   emitidos: { tipo: string; criado_em: string }[];
 };
 
-export function fundosParaEmissao(dataBase: string, busca?: string | null): FundoParaEmissao[] {
+export async function fundosParaEmissao(dataBase: string, busca?: string | null): Promise<FundoParaEmissao[]> {
   const termo = (busca ?? '').trim().toLowerCase();
   const digitosBusca = termo.replace(/\D/g, '');
-  return fundos().filter((f) => !termo || f.nome.toLowerCase().includes(termo) || (digitosBusca.length >= 3 && f.cnpj.includes(digitosBusca))).map((f) => {
-    const carteira = carteiraEmCache(f.id, dataBase);
-    const base = baseDoTrimestre(f, dataBase);
-    const rascunho = db().prepare('SELECT id, snapshot FROM relatorio_rascunhos WHERE fundo_id = ? AND data_base = ?').get(f.id, dataBase) as { id: string; snapshot: string } | undefined;
+  const lista = (await fundos()).filter((f) => !termo || f.nome.toLowerCase().includes(termo) || (digitosBusca.length >= 3 && f.cnpj.includes(digitosBusca)));
+  // Tudo da data-base em poucas consultas (não quatro por fundo).
+  const c = await db();
+  const carteiras = await carteirasEmCache(dataBase);
+  const bases = await basesDoTrimestre(lista, dataBase);
+  const rascunhos = new Map((await c.prepare('SELECT id, fundo_id, snapshot FROM relatorio_rascunhos WHERE data_base = ?')
+    .all<{ id: string; fundo_id: number; snapshot: string }>(dataBase)).map((r) => [r.fundo_id, r]));
+  const emissoes = await c.prepare(`SELECT e.rascunho_id, e.tipo, MAX(e.criado_em) criado_em FROM relatorio_emissoes e
+      JOIN relatorio_rascunhos r ON r.id = e.rascunho_id WHERE r.data_base = ? GROUP BY e.rascunho_id, e.tipo`)
+    .all<{ rascunho_id: string; tipo: string; criado_em: string }>(dataBase);
+  return lista.map((f) => {
+    const carteira = carteiras.get(f.id) ?? null;
+    const base = bases.get(f.id) ?? null;
+    const rascunho = rascunhos.get(f.id);
     const amostra = rascunho ? (JSON.parse(rascunho.snapshot) as Snapshot).amostra.total_quantidade : null;
     const totalDc = carteira ? (carteira.linhas[LINHA_VINCENDOS] ?? 0) + (carteira.linhas[LINHA_VENCIDOS] ?? 0) : 0;
-    const emitidos = rascunho ? db().prepare(`SELECT tipo, MAX(criado_em) criado_em FROM relatorio_emissoes WHERE rascunho_id = ? GROUP BY tipo`).all(rascunho.id) as { tipo: string; criado_em: string }[] : [];
+    const emitidos = rascunho ? emissoes.filter((e) => e.rascunho_id === rascunho.id).map((e) => ({ tipo: e.tipo, criado_em: e.criado_em })) : [];
     return {
       id: f.id, nome: f.nome, cnpj: formatarCpfCnpj(f.cnpj), tipo: f.tipo, administrador: f.administrador.nome ?? 'Não informado',
       tem_carteira: Boolean(carteira), tem_base: Boolean(base), base_nome: base?.nome ?? null, rascunho_id: rascunho?.id ?? null,
@@ -195,34 +221,36 @@ export type Rascunho = {
 };
 
 export async function prepararRascunho(fundoId: number, dataBase: string, opcoes: { antecipada?: boolean; forcar?: boolean; baixar?: Baixar } = {}): Promise<Rascunho> {
-  const f = fundo(fundoId);
+  const f = await fundo(fundoId);
   const carteira = (await coletarCarteirasPara([f], dataBase, { forcar: opcoes.forcar, baixar: opcoes.baixar })).get(f.id) ?? null;
-  const base = baseDoTrimestre(f, dataBase);
-  const snapshot = montarSnapshot(f, carteira, dataBase, base, Boolean(opcoes.antecipada));
+  const base = await baseDoTrimestre(f, dataBase);
+  const snapshot = await montarSnapshot(f, carteira, dataBase, base, Boolean(opcoes.antecipada));
   snapshot.roteiro_cvm = await roteiroDoCvm(f, snapshot.cenario);
   let escolhas = escolhasIniciais(snapshot);
-  const existente = db().prepare('SELECT id, escolhas FROM relatorio_rascunhos WHERE fundo_id = ? AND data_base = ?').get(f.id, dataBase) as { id: string; escolhas: string } | undefined;
+  const c = await db();
+  const existente = await c.prepare('SELECT id, escolhas FROM relatorio_rascunhos WHERE fundo_id = ? AND data_base = ?').get<{ id: string; escolhas: string }>(f.id, dataBase);
   if (existente) {
     // Mantém o que a pessoa já revisou; só os números são refeitos.
     escolhas = { ...escolhas, ...(JSON.parse(existente.escolhas) as Record<string, string>) };
-    db().prepare(`UPDATE relatorio_rascunhos SET snapshot = ?, escolhas = ?, cenario = ?, antecipada = ?, base_id = ?, revisao = revisao + 1, atualizado_em = ? WHERE id = ?`)
+    await c.prepare(`UPDATE relatorio_rascunhos SET snapshot = ?, escolhas = ?, cenario = ?, antecipada = ?, base_id = ?, revisao = revisao + 1, atualizado_em = ? WHERE id = ?`)
       .run(JSON.stringify(snapshot), JSON.stringify(escolhas), snapshot.cenario, opcoes.antecipada ? 1 : 0, base?.id ?? null, agora(), existente.id);
     return obterRascunho(existente.id);
   }
   const id = randomUUID();
-  db().prepare(`INSERT INTO relatorio_rascunhos (id, fundo_id, data_base, base_id, antecipada, cenario, snapshot, escolhas, criado_em, atualizado_em)
+  await c.prepare(`INSERT INTO relatorio_rascunhos (id, fundo_id, data_base, base_id, antecipada, cenario, snapshot, escolhas, criado_em, atualizado_em)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, f.id, dataBase, base?.id ?? null, opcoes.antecipada ? 1 : 0, snapshot.cenario, JSON.stringify(snapshot), JSON.stringify(escolhas), agora(), agora());
   return obterRascunho(id);
 }
 
-export function obterRascunho(id: string): Rascunho {
-  const r = db().prepare('SELECT * FROM relatorio_rascunhos WHERE id = ?').get(id) as
-    { id: string; fundo_id: number; data_base: string; revisao: number; cenario: string; snapshot: string; escolhas: string; overrides: string; atualizado_em: string } | undefined;
+export async function obterRascunho(id: string): Promise<Rascunho> {
+  const c = await db();
+  const r = await c.prepare('SELECT * FROM relatorio_rascunhos WHERE id = ?')
+    .get<{ id: string; fundo_id: number; data_base: string; revisao: number; cenario: string; snapshot: string; escolhas: string; overrides: string; atualizado_em: string }>(id);
   if (!r) throw new ErroDeUso('Rascunho não encontrado. Prepare o relatório de novo.', 404);
   const snapshot = JSON.parse(r.snapshot) as Snapshot;
   const escolhas = JSON.parse(r.escolhas) as Record<string, string>;
   const overrides = JSON.parse(r.overrides) as Record<string, string>;
-  const emissoes = (db().prepare('SELECT id, tipo, nome_arquivo, criado_em, sem_pendencias, revisao FROM relatorio_emissoes WHERE rascunho_id = ? ORDER BY criado_em DESC').all(id) as
+  const emissoes = ((await c.prepare('SELECT id, tipo, nome_arquivo, criado_em, sem_pendencias, revisao FROM relatorio_emissoes WHERE rascunho_id = ? ORDER BY criado_em DESC').all(id)) as
     { id: string; tipo: string; nome_arquivo: string; criado_em: string; sem_pendencias: number; revisao: number }[]).map((e) => ({ ...e, sem_pendencias: Boolean(e.sem_pendencias) }));
   return {
     id: r.id, fundo_id: r.fundo_id, data_base: r.data_base, revisao: r.revisao, cenario: r.cenario, snapshot, escolhas, overrides,
@@ -230,11 +258,11 @@ export function obterRascunho(id: string): Rascunho {
   };
 }
 
-export function salvarEscolhas(id: string, escolhas: Record<string, string>, overrides: Record<string, string>): Rascunho {
-  const atual = obterRascunho(id);
+export async function salvarEscolhas(id: string, escolhas: Record<string, string>, overrides: Record<string, string>): Promise<Rascunho> {
+  const atual = await obterRascunho(id);
   const validas = new Set(atual.secoes.map((s) => s.chave));
   const limpar = (o: Record<string, string>) => Object.fromEntries(Object.entries(o ?? {}).filter(([k, v]) => validas.has(k) && typeof v === 'string'));
-  db().prepare('UPDATE relatorio_rascunhos SET escolhas = ?, overrides = ?, atualizado_em = ? WHERE id = ?')
+  await (await db()).prepare('UPDATE relatorio_rascunhos SET escolhas = ?, overrides = ?, atualizado_em = ? WHERE id = ?')
     .run(JSON.stringify({ ...atual.escolhas, ...limpar(escolhas) }), JSON.stringify(limpar(overrides)), agora(), id);
   return obterRascunho(id);
 }
@@ -252,7 +280,7 @@ export type Emitido = { id: string; tipo: TipoRelatorio; nome_arquivo: string; t
 
 export async function emitir(rascunhoId: string, tipos: TipoRelatorio[], opcoes: { confirmarSemBase?: boolean; semPendencias?: boolean; loteId?: string | null } = {}): Promise<Emitido[]> {
   if (!tipos.length) throw new ErroDeUso('Escolha CVM, NIX ou os dois.');
-  const r = obterRascunho(rascunhoId);
+  const r = await obterRascunho(rascunhoId);
   const s = r.snapshot;
   if (!s.carteira.disponivel) {
     throw new ErroDeUso('Não há carteira do informe mensal da CVM para este fundo na data-base. Confira o CNPJ do fundo ou atualize a coleta antes de emitir.');
@@ -260,11 +288,9 @@ export async function emitir(rascunhoId: string, tipos: TipoRelatorio[], opcoes:
   if (s.sem_base && r.cenario === CENARIO_SEM_MOVIMENTACAO && !opcoes.confirmarSemBase) {
     throw new ErroDeUso('O fundo tem direitos creditórios na carteira, mas nenhuma base de auditoria foi enviada no trimestre. Envie a base ou confirme a emissão como sem movimentação.', 409);
   }
-  const f = fundo(r.fundo_id);
+  const f = await fundo(r.fundo_id);
   // Identidade atual do cadastro; os números continuam os do rascunho.
   const snapshot: Snapshot = { ...s, administrador: f.administrador };
-  const pasta = join(/*turbopackIgnore: true*/ pastaDeDados(), 'relatorios');
-  mkdirSync(pasta, { recursive: true });
   const saida: Emitido[] = [];
   for (const tipo of tipos) {
     if (!TIPOS.includes(tipo)) throw new ErroDeUso(`Tipo de relatório inválido: ${tipo}`);
@@ -274,8 +300,8 @@ export async function emitir(rascunhoId: string, tipos: TipoRelatorio[], opcoes:
     const conteudo = await renderizar(modelo, construirContexto(dados, r.textos), listasDoSnapshot(dados));
     const id = randomUUID();
     const nome = nomeArquivo(tipo, f.nome, f.cnpj);
-    writeFileSync(join(pasta, `${id}.docx`), conteudo);
-    db().prepare(`INSERT INTO relatorio_emissoes (id, rascunho_id, revisao, tipo, lote_id, nome_arquivo, arquivo, sha256, sem_pendencias, criado_em)
+    await gravarArquivo(`relatorios/${id}.docx`, conteudo);
+    await (await db()).prepare(`INSERT INTO relatorio_emissoes (id, rascunho_id, revisao, tipo, lote_id, nome_arquivo, arquivo, sha256, sem_pendencias, criado_em)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, r.id, r.revisao, tipo, opcoes.loteId ?? null, nome, `relatorios/${id}.docx`,
       createHash('sha256').update(conteudo).digest('hex'), oculta ? 1 : 0, agora());
     saida.push({ id, tipo, nome_arquivo: nome, tamanho: conteudo.length, sem_pendencias: oculta });
@@ -289,7 +315,7 @@ export type ResultadoLote = { lote_id: string; emitidos: (Emitido & { fundo: str
 export async function emitirEmLote(fundoIds: number[], dataBase: string, tipos: TipoRelatorio[], opcoes: { antecipada?: boolean; confirmarSemBase?: boolean; semPendencias?: boolean; baixar?: Baixar } = {}): Promise<ResultadoLote> {
   if (!fundoIds.length) throw new ErroDeUso('Selecione ao menos um fundo.');
   const loteId = randomUUID();
-  const lista = fundos(fundoIds);
+  const lista = await fundos(fundoIds);
   await coletarCarteirasPara(lista, dataBase, { baixar: opcoes.baixar });
   const emitidos: ResultadoLote['emitidos'] = [];
   const erros: ResultadoLote['erros'] = [];
@@ -304,22 +330,22 @@ export async function emitirEmLote(fundoIds: number[], dataBase: string, tipos: 
   return { lote_id: loteId, emitidos, erros };
 }
 
-export function arquivoDaEmissao(id: string): { nome: string; conteudo: Uint8Array } {
-  const e = db().prepare('SELECT nome_arquivo, arquivo FROM relatorio_emissoes WHERE id = ?').get(id) as { nome_arquivo: string; arquivo: string } | undefined;
+export async function arquivoDaEmissao(id: string): Promise<{ nome: string; conteudo: Uint8Array }> {
+  const e = await (await db()).prepare('SELECT nome_arquivo, arquivo FROM relatorio_emissoes WHERE id = ?').get<{ nome_arquivo: string; arquivo: string }>(id);
   if (!e) throw new ErroDeUso('Relatório não encontrado.', 404);
-  const caminho = join(/*turbopackIgnore: true*/ pastaDeDados(), e.arquivo);
-  if (!existsSync(caminho)) throw new ErroDeUso('O arquivo deste relatório não está mais na pasta de dados. Emita de novo.', 404);
-  return { nome: e.nome_arquivo, conteudo: new Uint8Array(readFileSync(caminho)) };
+  const conteudo = await lerArquivo(e.arquivo);
+  if (!conteudo) throw new ErroDeUso('O arquivo deste relatório não está mais no armazenamento. Emita de novo.', 404);
+  return { nome: e.nome_arquivo, conteudo };
 }
 
 /** ZIP com todos os .docx de um lote. */
 export async function zipDoLote(loteId: string): Promise<Uint8Array> {
-  const linhas = db().prepare('SELECT id FROM relatorio_emissoes WHERE lote_id = ?').all(loteId) as { id: string }[];
+  const linhas = await (await db()).prepare('SELECT id FROM relatorio_emissoes WHERE lote_id = ?').all<{ id: string }>(loteId);
   if (!linhas.length) throw new ErroDeUso('Lote não encontrado.', 404);
   const zip = new JSZip();
   const usados = new Set<string>();
   for (const l of linhas) {
-    const a = arquivoDaEmissao(l.id);
+    const a = await arquivoDaEmissao(l.id);
     let nome = a.nome;
     for (let i = 2; usados.has(nome); i++) nome = a.nome.replace(/\.docx$/, ` (${i}).docx`);
     usados.add(nome);
@@ -328,8 +354,8 @@ export async function zipDoLote(loteId: string): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
-export function historico(limite = 50) {
-  return db().prepare(`SELECT e.id, e.tipo, e.nome_arquivo, e.criado_em, e.sem_pendencias, e.lote_id, r.data_base, f.nome AS fundo
+export async function historico(limite = 50) {
+  return (await db()).prepare(`SELECT e.id, e.tipo, e.nome_arquivo, e.criado_em, e.sem_pendencias, e.lote_id, r.data_base, f.nome AS fundo
       FROM relatorio_emissoes e JOIN relatorio_rascunhos r ON r.id = e.rascunho_id JOIN fundos f ON f.id = r.fundo_id
-     ORDER BY e.criado_em DESC LIMIT ?`).all(limite) as { id: string; tipo: string; nome_arquivo: string; criado_em: string; sem_pendencias: number; lote_id: string | null; data_base: string; fundo: string }[];
+     ORDER BY e.criado_em DESC LIMIT ?`).all<{ id: string; tipo: string; nome_arquivo: string; criado_em: string; sem_pendencias: number; lote_id: string | null; data_base: string; fundo: string }>(limite);
 }

@@ -22,7 +22,7 @@ export async function POST(_req: Request, ctx: RouteContext<'/api/bases/[id]/pre
         // Deixa a resposta de quem chamou sair do laço antes do trabalho pesado.
         await new Promise((ok) => setTimeout(ok, 0));
         const inicio = Date.now();
-        const entrada = entradaDoMotor(id);
+        const entrada = await entradaDoMotor(id);
         if (!entrada.base) throw new ErroDeUso('Base não encontrada.', 404);
         if (!entrada.paginas.length) throw new ErroDeUso('Nenhum PDF com texto nesta base ainda. Envie os PDFs e espere a indexação.');
         const resultado = preClassificar({
@@ -36,7 +36,7 @@ export async function POST(_req: Request, ctx: RouteContext<'/api/bases/[id]/pre
         });
         const completo = { ...resultado, nomes_pdfs: entrada.nomesPdfs };
         const duracao = Date.now() - inicio;
-        salvarPreClassificacao(id, completo, duracao);
+        await salvarPreClassificacao(id, completo, duracao);
         return obterPreClassificacao(id);
       })().finally(() => g.__batePdfPreEmCurso!.delete(id));
       g.__batePdfPreEmCurso.set(id, execucao);
@@ -48,6 +48,6 @@ export async function POST(_req: Request, ctx: RouteContext<'/api/bases/[id]/pre
 export async function GET(_req: Request, ctx: RouteContext<'/api/bases/[id]/pre-classificar'>) {
   return responder(async () => {
     const { id } = await ctx.params;
-    return Response.json(obterPreClassificacao(id));
+    return Response.json(await obterPreClassificacao(id));
   });
 }

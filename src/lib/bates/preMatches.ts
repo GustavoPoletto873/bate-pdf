@@ -1,4 +1,4 @@
-import { db, transacao } from '@/lib/db';
+import { db, emBlocos, transacao, type Banco, type Valor } from '@/lib/db';
 import { camposDoLado, type CampoId, type Lado, type TituloAmostra, type Veredito } from '@/lib/campos';
 import {
   avaliarConfiabilidade, ladoDaLeitura, vereditosDoLado,
@@ -72,9 +72,13 @@ type LinhaPreBate = {
   pdf_nome: string | null;
 } & Record<string, unknown>;
 
-function carregarPreBates(baseId: string, ids?: number[]): { pre: PreBate; titulo: TituloDaBase; leitura: LeituraLinha }[] {
-  const filtro = ids?.length ? `AND pm.id IN (${ids.map(() => '?').join(',')})` : '';
-  const linhas = db().prepare(`
+async function carregarPreBates(conexao: Banco, baseId: string, ids?: number[]): Promise<{ pre: PreBate; titulo: TituloDaBase; leitura: LeituraLinha }[]> {
+  // Com ids, em blocos (IN com muitos ids passa do limite de parâmetros).
+  const grupos: (number[] | undefined)[] = ids?.length ? emBlocos(ids) : [undefined];
+  const linhas: LinhaPreBate[] = [];
+  for (const grupo of grupos) {
+  const filtro = grupo ? `AND pm.id IN (${grupo.map(() => '?').join(',')})` : '';
+  linhas.push(...await conexao.prepare(`
     SELECT pm.id AS pre_match_id, pm.pendencia_id, p.lado, pm.similaridade, pm.criterio, pm.criado_em,
       d.nome_arquivo AS pdf_nome, ${COLUNAS_TITULO}, ${COLUNAS_LEITURA}
     FROM pre_matches pm
@@ -83,7 +87,8 @@ function carregarPreBates(baseId: string, ids?: number[]): { pre: PreBate; titul
     JOIN leituras l ON l.id = pm.leitura_id
     LEFT JOIN pdfs d ON d.id = l.pdf_id
     WHERE pm.base_id = ? ${filtro}
-    ORDER BY pm.id`).all(baseId, ...(ids ?? [])) as LinhaPreBate[];
+    ORDER BY pm.id`).all<LinhaPreBate>(baseId, ...(grupo ?? [])));
+  }
   return linhas.map((r) => {
     const titulo = tituloDaLinha(r);
     const leitura: LeituraLinha = {
@@ -152,8 +157,8 @@ export type PaginaPreBates = {
   ids: number[];
 };
 
-export function listarPreBates(baseId: string, filtro: FiltroPreBates = {}): PaginaPreBates {
-  const todos = carregarPreBates(baseId);
+export async function listarPreBates(baseId: string, filtro: FiltroPreBates = {}): Promise<PaginaPreBates> {
+  const todos = await carregarPreBates(await db(), baseId);
   const tipo = filtro.tipo ?? 'todos';
   const daAba = todos.filter((x) => tipo === 'todos' || x.pre.lado === tipo);
   const porConfiabilidade: Record<number, number> = {};
@@ -187,36 +192,41 @@ export function listarPreBates(baseId: string, filtro: FiltroPreBates = {}): Pag
  * similaridade, o PDF da leitura e o veredito por campo da comparação) e a pendência fica
  * vinculada. Pré-bate de pendência que já foi batida por outro caminho só é descartado.
  */
-export function confirmarPreBates(baseId: string, ids: number[]): { confirmados: number; descartados: number } {
+export async function confirmarPreBates(baseId: string, ids: number[]): Promise<{ confirmados: number; descartados: number }> {
   if (!ids.length) return { confirmados: 0, descartados: 0 };
-  const c = db();
   let confirmados = 0;
   let descartados = 0;
-  transacao(() => {
-    const itens = carregarPreBates(baseId, ids);
-    const situacao = c.prepare('SELECT situacao FROM pendencias WHERE id = ?');
-    const apagar = c.prepare('DELETE FROM pre_matches WHERE id = ?');
+  await transacao(async (tx) => {
+    const itens = await carregarPreBates(tx, baseId, ids);
+    // Situação de todas as pendências de uma vez; as escritas vão num lote só.
+    const situacao = new Map<number, string>();
+    for (const bloco of emBlocos([...new Set(itens.map((x) => x.pre.pendencia_id))])) {
+      for (const r of await tx.prepare(`SELECT id, situacao FROM pendencias WHERE id IN (${bloco.map(() => '?').join(',')})`).all<{ id: number; situacao: string }>(...bloco)) {
+        situacao.set(r.id, r.situacao);
+      }
+    }
     const ts = agora();
+    const comandos: Comando[] = [];
     for (const { pre, titulo, leitura } of itens) {
-      const s = situacao.get(pre.pendencia_id) as { situacao: string } | undefined;
-      apagar.run(pre.pre_match_id);
-      if (s?.situacao !== 'pendente') { descartados++; continue; }
-      criarVinculoDeLeitura(baseId, {
+      comandos.push({ sql: 'DELETE FROM pre_matches WHERE id = ?', args: [pre.pre_match_id] });
+      if (situacao.get(pre.pendencia_id) !== 'pendente') { descartados++; continue; }
+      comandos.push(...comandosDoVinculo({
         pendencia_id: pre.pendencia_id, lado: pre.lado, titulo, leitura,
         tipo_match: 'automatico', origem: 'pre_bate', similaridade: pre.similaridade, ts,
-      });
+      }));
+      // Duas confirmações da mesma pendência no lote: só a primeira vale.
+      situacao.set(pre.pendencia_id, 'vinculado');
       confirmados++;
     }
-    if (confirmados) c.prepare('UPDATE bases SET atualizado_em = ? WHERE id = ?').run(ts, baseId);
+    if (confirmados) comandos.push({ sql: 'UPDATE bases SET atualizado_em = ? WHERE id = ?', args: [ts, baseId] });
+    for (const bloco of emBlocos(comandos, 200)) await tx.lote(bloco);
   });
   return { confirmados, descartados };
 }
 
-/**
- * Cria o vínculo de uma pendência com uma leitura que já existe (pré-bate confirmado ou
- * Inserir Resultado). `salvas` = vereditos que valem mais que a comparação. Dentro de transação.
- */
-export function criarVinculoDeLeitura(baseId: string, d: {
+type Comando = { sql: string; args: Valor[] };
+
+export type DadosVinculoDeLeitura = {
   pendencia_id: number;
   lado: Lado;
   titulo: TituloAmostra;
@@ -226,28 +236,41 @@ export function criarVinculoDeLeitura(baseId: string, d: {
   similaridade: number | null;
   salvas?: Partial<Record<CampoId, Veredito>>;
   ts: string;
-}) {
-  const c = db();
+};
+
+/**
+ * Os comandos que criam o vínculo de uma pendência com uma leitura que já existe (pré-bate
+ * confirmado ou Inserir Resultado). `salvas` = vereditos que valem mais que a comparação.
+ */
+export function comandosDoVinculo(d: DadosVinculoDeLeitura): Comando[] {
   const campos = camposDaLeitura(d.leitura, d.lado);
   const marcacoes = vereditosDoLado(d.lado, d.titulo, campos, d.salvas);
-  c.prepare(`INSERT INTO vinculos (pendencia_id, pdf_id, pagina, marcacoes, leitura, origem, usuario, criado_em, leitura_id, tipo_match, similaridade)
-    VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?)`)
-    .run(d.pendencia_id, d.leitura.pdf_id ?? null, JSON.stringify(marcacoes), JSON.stringify(campos), d.origem, d.ts,
-      d.leitura.id, d.tipo_match, d.similaridade);
-  c.prepare("UPDATE pendencias SET situacao = 'vinculado' WHERE id = ?").run(d.pendencia_id);
-  c.prepare('DELETE FROM pre_matches WHERE pendencia_id = ?').run(d.pendencia_id);
-  void baseId;
+  return [
+    {
+      sql: `INSERT INTO vinculos (pendencia_id, pdf_id, pagina, marcacoes, leitura, origem, usuario, criado_em, leitura_id, tipo_match, similaridade)
+    VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+      args: [d.pendencia_id, d.leitura.pdf_id ?? null, JSON.stringify(marcacoes), JSON.stringify(campos), d.origem, d.ts,
+        d.leitura.id, d.tipo_match, d.similaridade],
+    },
+    { sql: "UPDATE pendencias SET situacao = 'vinculado' WHERE id = ?", args: [d.pendencia_id] },
+    { sql: 'DELETE FROM pre_matches WHERE pendencia_id = ?', args: [d.pendencia_id] },
+  ];
+}
+
+/** Cria o vínculo de uma pendência com uma leitura que já existe (dentro de transação, com o `tx`). */
+export async function criarVinculoDeLeitura(tx: Banco, d: DadosVinculoDeLeitura) {
+  await tx.lote(comandosDoVinculo(d));
 }
 
 /** reject_pre_matches: apaga o pré-bate; a pendência continua aberta e a leitura fica órfã. */
-export function rejeitarPreBates(baseId: string, ids: number[]): { rejeitados: number } {
+export async function rejeitarPreBates(baseId: string, ids: number[]): Promise<{ rejeitados: number }> {
   if (!ids.length) return { rejeitados: 0 };
-  let n = 0;
-  transacao(() => {
-    const r = db().prepare(`DELETE FROM pre_matches WHERE base_id = ? AND id IN (${ids.map(() => '?').join(',')})`).run(baseId, ...ids);
-    n = Number(r.changes);
-  });
-  return { rejeitados: n };
+  const comandos = emBlocos(ids).map((bloco) => ({
+    sql: `DELETE FROM pre_matches WHERE base_id = ? AND id IN (${bloco.map(() => '?').join(',')})`,
+    args: [baseId, ...bloco] as Valor[],
+  }));
+  const rs = await (await db()).lote(comandos);
+  return { rejeitados: rs.reduce((a, r) => a + Number(r.changes), 0) };
 }
 
 // ---------------------------------------------------------------------------
@@ -267,33 +290,34 @@ export type PainelBates = {
   motivo_processar: MotivoProcessar;
 };
 
-export function painelDaBase(baseId: string): PainelBates {
-  const c = db();
-  const um = <T>(sql: string, ...p: (string | number)[]) => c.prepare(sql).get(...p) as T;
-  const vinc = c.prepare(`SELECT v.tipo_match, COUNT(*) n FROM vinculos v JOIN pendencias p ON p.id = v.pendencia_id
+export async function painelDaBase(baseId: string): Promise<PainelBates> {
+  const c = await db();
+  const um = async <T>(sql: string, ...p: (string | number)[]) => (await c.prepare(sql).get(...p)) as T;
+  const vinc = await c.prepare(`SELECT v.tipo_match, COUNT(*) n FROM vinculos v JOIN pendencias p ON p.id = v.pendencia_id
     WHERE p.base_id = ? GROUP BY v.tipo_match`).all(baseId) as { tipo_match: string; n: number }[];
   const automaticos = vinc.filter((v) => v.tipo_match === 'automatico').reduce((a, v) => a + v.n, 0);
   const manuais = vinc.filter((v) => v.tipo_match !== 'automatico').reduce((a, v) => a + v.n, 0);
-  const jaBatidos = um<{ n: number }>("SELECT COUNT(*) n FROM pendencias WHERE base_id = ? AND situacao = 'ja_batido'", baseId).n;
-  const abertas = c.prepare(`SELECT p.lado, COUNT(*) n FROM pendencias p WHERE p.base_id = ? AND p.situacao = 'pendente'
+  const jaBatidos = (await um<{ n: number }>("SELECT COUNT(*) n FROM pendencias WHERE base_id = ? AND situacao = 'ja_batido'", baseId)).n;
+  const abertas = await c.prepare(`SELECT p.lado, COUNT(*) n FROM pendencias p WHERE p.base_id = ? AND p.situacao = 'pendente'
     AND NOT EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.pendencia_id = p.id) GROUP BY p.lado`).all(baseId) as { lado: Lado; n: number }[];
-  const pre = c.prepare(`SELECT p.lado, COUNT(*) n FROM pre_matches pm JOIN pendencias p ON p.id = pm.pendencia_id
+  const pre = await c.prepare(`SELECT p.lado, COUNT(*) n FROM pre_matches pm JOIN pendencias p ON p.id = pm.pendencia_id
     WHERE pm.base_id = ? GROUP BY p.lado`).all(baseId) as { lado: Lado; n: number }[];
-  const leituras = c.prepare(`SELECT l.id, l.pdf_id, l.documento_id, l.tipo_recebivel,
+  const leituras = await c.prepare(`SELECT l.id, l.pdf_id, l.documento_id, l.tipo_recebivel,
       (EXISTS (SELECT 1 FROM vinculos v WHERE v.leitura_id = l.id) OR EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.leitura_id = l.id)) AS usada
     FROM leituras l WHERE l.base_id = ?`).all(baseId) as { id: number; pdf_id: number | null; documento_id: number | null; tipo_recebivel: string | null; usada: number }[];
   // Um documento conta uma vez: o do Anexo, senão o PDF, senão a própria linha (planilha/manual).
   const documentos = (lado: Lado) => new Set(leituras.filter((l) => ladoDaLeitura(l.tipo_recebivel) === lado)
     .map((l) => (l.documento_id != null ? `d${l.documento_id}` : l.pdf_id != null ? `p${l.pdf_id}` : `l${l.id}`))).size;
   const n = (lista: { lado: Lado; n: number }[], lado: Lado) => lista.find((x) => x.lado === lado)?.n ?? 0;
-  const pp = podeProcessar(baseId);
+  const pp = await podeProcessar(baseId);
+  const totalRegistros = (await um<{ n: number }>('SELECT COUNT(*) n FROM titulos WHERE base_id = ?', baseId)).n;
   return {
     total_confirmados: automaticos + manuais + jaBatidos,
     confirmados: { automaticos, manuais, do_bate_lastro: jaBatidos },
     pendentes: { termo: n(abertas, 'termo'), lastro: n(abertas, 'lastro') },
     total_pre_matches: n(pre, 'termo') + n(pre, 'lastro'),
     pre_matches: { termo: n(pre, 'termo'), lastro: n(pre, 'lastro') },
-    total_registros: um<{ n: number }>('SELECT COUNT(*) n FROM titulos WHERE base_id = ?', baseId).n,
+    total_registros: totalRegistros,
     leituras: {
       termo: documentos('termo'),
       lastro: documentos('lastro'),
@@ -315,18 +339,18 @@ export type PendenciaAberta = {
 export type LeituraOrfa = LeituraLinha & { lado: Lado; pdf_nome: string | null };
 
 /** Títulos ainda sem documento (pendentes e sem pré-bate) e leituras sem título (órfãs). */
-export function pendenciasEOrfas(baseId: string, limite = 300): {
+export async function pendenciasEOrfas(baseId: string, limite = 300): Promise<{
   pendencias: PendenciaAberta[];
   total_pendencias: { termo: number; lastro: number };
   orfas: LeituraOrfa[];
   total_orfas: number;
-} {
-  const c = db();
-  const pend = c.prepare(`SELECT p.id AS pendencia_id, p.lado, ${COLUNAS_TITULO}
+}> {
+  const c = await db();
+  const pend = await c.prepare(`SELECT p.id AS pendencia_id, p.lado, ${COLUNAS_TITULO}
     FROM pendencias p JOIN titulos t ON t.id = p.titulo_id
     WHERE p.base_id = ? AND p.situacao = 'pendente' AND NOT EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.pendencia_id = p.id)
     ORDER BY p.lado DESC, t.id`).all(baseId) as ({ pendencia_id: number; lado: Lado } & Record<string, unknown>)[];
-  const orfas = c.prepare(`SELECT ${COLUNAS_LEITURA}, d.nome_arquivo AS pdf_nome FROM leituras l LEFT JOIN pdfs d ON d.id = l.pdf_id
+  const orfas = await c.prepare(`SELECT ${COLUNAS_LEITURA}, d.nome_arquivo AS pdf_nome FROM leituras l LEFT JOIN pdfs d ON d.id = l.pdf_id
     WHERE l.base_id = ? AND NOT EXISTS (SELECT 1 FROM vinculos v WHERE v.leitura_id = l.id)
       AND NOT EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.leitura_id = l.id)
     ORDER BY l.id`).all(baseId) as (LeituraLinha & { pdf_nome: string | null })[];

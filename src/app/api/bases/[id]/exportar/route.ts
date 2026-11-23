@@ -13,20 +13,20 @@ export const dynamic = 'force-dynamic';
 export async function GET(request: Request, ctx: RouteContext<'/api/bases/[id]/exportar'>) {
   return responder(async () => {
     const { id } = await ctx.params;
-    const base = obterBase(id);
+    const base = await obterBase(id);
     if (!base) throw new ErroDeUso('Base não encontrada.', 404);
     const params = new URL(request.url).searchParams;
     const agora = new Date();
     if (params.get('formato') === 'json') {
       const nome = `bate-pdf_${(base.nome_fundo ?? base.nome).replace(/[^\w-]+/g, '_')}_${agora.toISOString().slice(0, 10)}.json`;
-      return new Response(JSON.stringify(backupDaBase(id), null, 2), {
+      return new Response(JSON.stringify(await backupDaBase(id), null, 2), {
         headers: {
           'Content-Type': 'application/json; charset=utf-8',
           'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(nome)}`,
         },
       });
     }
-    const linhas = linhasParaExportar(id, { incluirPendentes: params.get('pendentes') !== '0' });
+    const linhas = await linhasParaExportar(id, { incluirPendentes: params.get('pendentes') !== '0' });
     const bytes = await gerarPlanilhaResultados(linhas, {
       nome: base.nome, cnpj: base.cnpj_fundo, geradoEm: agora, nomeFundo: base.nome_fundo, dataReferencia: base.data_referencia,
     });

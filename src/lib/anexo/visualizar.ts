@@ -1,4 +1,3 @@
-import type { DatabaseSync } from 'node:sqlite';
 import { db } from '@/lib/db';
 import type { Leitura } from '@/lib/leituras';
 
@@ -39,21 +38,28 @@ export const COLUNAS_ORDENAVEIS = [
 ] as const;
 export type ColunaOrdenavel = (typeof COLUNAS_ORDENAVEIS)[number];
 
-const conexoesComFuncao = new WeakSet<DatabaseSync>();
+/** Cada letra base e as formas dela (maiúscula e acentuadas) que a busca aceita. */
+const VARIANTES: Record<string, string> = {
+  a: 'aAáàâãäÁÀÂÃÄ', e: 'eEéèêëÉÈÊË', i: 'iIíìîïÍÌÎÏ', o: 'oOóòôõöÓÒÔÕÖ', u: 'uUúùûüÚÙÛÜ', c: 'cCçÇ', n: 'nNñÑ',
+};
 
-/** Função SQL para comparar sem maiúsculas nem acentos (o ILIKE + unaccent do Postgres). */
-function conexao(): DatabaseSync {
-  const c = db();
-  if (!conexoesComFuncao.has(c)) {
-    c.function('bp_texto_busca', { deterministic: true }, (v: unknown) =>
-      v === null || v === undefined ? null : String(v).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase());
-    conexoesComFuncao.add(c);
+/**
+ * Padrão GLOB que acha o termo sem diferenciar maiúsculas nem acentos (o ILIKE + unaccent do
+ * Postgres). Classes de caracteres em vez de uma função SQL do app (o Turso não aceita funções
+ * registradas) ou de REPLACEs aninhados (estouram a pilha do parser).
+ */
+function padraoBusca(termo: string): string {
+  let p = '';
+  for (const ch of normalizar(termo)) {
+    if (VARIANTES[ch]) p += `[${VARIANTES[ch]}]`;
+    else if (/[a-z]/.test(ch)) p += `[${ch}${ch.toUpperCase()}]`;
+    else if (ch === '*' || ch === '?' || ch === '[') p += `[${ch}]`;
+    else p += ch;
   }
-  return c;
+  return `*${p}*`;
 }
 
 const normalizar = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
-const escaparLike = (s: string) => s.replace(/[\\%_]/g, (m) => `\\${m}`);
 const DATA = /^\d{4}-\d{2}-\d{2}$/;
 
 function montarFiltro(f: FiltrosLeituras): { onde: string; args: (string | number)[] } {
@@ -62,8 +68,8 @@ function montarFiltro(f: FiltrosLeituras): { onde: string; args: (string | numbe
   const texto = (coluna: string, valor?: string) => {
     const v = valor?.trim();
     if (!v) return;
-    onde.push(`bp_texto_busca(${coluna}) LIKE ? ESCAPE '\\'`);
-    args.push(`%${escaparLike(normalizar(v))}%`);
+    onde.push(`${coluna} GLOB ?`);
+    args.push(padraoBusca(v));
   };
   const documento = (coluna: string, valor?: string) => {
     const v = valor?.trim();
@@ -83,8 +89,8 @@ function montarFiltro(f: FiltrosLeituras): { onde: string; args: (string | numbe
   texto('l.numero_documento', f.numero_documento);
   texto('l.tipo_recebivel', f.tipo_recebivel);
   if (f.base?.trim()) {
-    const v = `%${escaparLike(normalizar(f.base.trim()))}%`;
-    onde.push("(bp_texto_busca(l.base_id) LIKE ? ESCAPE '\\' OR bp_texto_busca(b.nome) LIKE ? ESCAPE '\\' OR bp_texto_busca(b.nome_fundo) LIKE ? ESCAPE '\\')");
+    const v = padraoBusca(f.base.trim());
+    onde.push('(l.base_id GLOB ? OR b.nome GLOB ? OR b.nome_fundo GLOB ?)');
     args.push(v, v, v);
   }
   const intervalo = (coluna: string, de?: string, ate?: string) => {
@@ -112,27 +118,27 @@ function ordem(coluna?: string, direcao?: string): string {
 
 const FROM = 'FROM leituras l LEFT JOIN bases b ON b.id = l.base_id LEFT JOIN pdfs p ON p.id = l.pdf_id';
 
-export function buscarLeituras(f: FiltrosLeituras, opcoes: { pagina?: number; porPagina?: number; ordenarPor?: string; direcao?: string } = {}):
-  { linhas: LeituraVisualizar[]; total: number; pagina: number; paginas: number; por_pagina: number } {
-  const c = conexao();
+export async function buscarLeituras(f: FiltrosLeituras, opcoes: { pagina?: number; porPagina?: number; ordenarPor?: string; direcao?: string } = {}):
+  Promise<{ linhas: LeituraVisualizar[]; total: number; pagina: number; paginas: number; por_pagina: number }> {
+  const c = await db();
   const porPagina = Math.min(100, Math.max(1, opcoes.porPagina ?? 15));
   const { onde, args } = montarFiltro(f);
-  const total = (c.prepare(`SELECT COUNT(*) n ${FROM} ${onde}`).get(...args) as { n: number }).n;
+  const total = Number((await c.prepare(`SELECT COUNT(*) n ${FROM} ${onde}`).get<{ n: number }>(...args))?.n ?? 0);
   const paginas = Math.max(1, Math.ceil(total / porPagina));
   const pagina = Math.min(Math.max(1, opcoes.pagina ?? 1), paginas);
-  const linhas = c.prepare(`SELECT l.*, b.nome AS base_nome, p.nome_arquivo AS pdf_nome ${FROM} ${onde} ${ordem(opcoes.ordenarPor, opcoes.direcao)}
-    LIMIT ? OFFSET ?`).all(...args, porPagina, (pagina - 1) * porPagina) as LeituraVisualizar[];
+  const linhas = await c.prepare(`SELECT l.*, b.nome AS base_nome, p.nome_arquivo AS pdf_nome ${FROM} ${onde} ${ordem(opcoes.ordenarPor, opcoes.direcao)}
+    LIMIT ? OFFSET ?`).all<LeituraVisualizar>(...args, porPagina, (pagina - 1) * porPagina);
   return { linhas, total, pagina, paginas, por_pagina: porPagina };
 }
 
 /** Limite de linhas de uma planilha .xlsx (2^20 menos o cabeçalho). */
 export const MAX_LINHAS_EXCEL = 1_048_575;
 
-export function todasAsLeituras(f: FiltrosLeituras, opcoes: { ordenarPor?: string; direcao?: string } = {}): LeituraVisualizar[] {
-  const c = conexao();
+export async function todasAsLeituras(f: FiltrosLeituras, opcoes: { ordenarPor?: string; direcao?: string } = {}): Promise<LeituraVisualizar[]> {
+  const c = await db();
   const { onde, args } = montarFiltro(f);
   return c.prepare(`SELECT l.*, b.nome AS base_nome, p.nome_arquivo AS pdf_nome ${FROM} ${onde} ${ordem(opcoes.ordenarPor, opcoes.direcao)} LIMIT ?`)
-    .all(...args, MAX_LINHAS_EXCEL + 1) as LeituraVisualizar[];
+    .all<LeituraVisualizar>(...args, MAX_LINHAS_EXCEL + 1);
 }
 
 export function filtrosDaUrl(params: URLSearchParams): FiltrosLeituras {

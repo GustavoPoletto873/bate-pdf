@@ -1,20 +1,48 @@
 import { AlternarTema } from '@/components/AlternarTema';
 import { Pagina, Secao } from '@/components/Pagina';
-import { Etiqueta } from '@/components/ui';
-import { db, pastaDeDados } from '@/lib/db';
+import { Botao, Etiqueta } from '@/components/ui';
+import { auth, loginAtivo, signOut } from '@/auth';
+import { armazenamentoNaNuvem } from '@/lib/arquivos';
+import { db, pastaDeDados, urlDoBanco } from '@/lib/db';
 import { MODELO_PADRAO, statusGemini } from '@/lib/ia/config';
 
 export const dynamic = 'force-dynamic';
 
 const codigo = 'rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm dark:border-slate-800 dark:bg-slate-900';
 
-export default function Perfil() {
+export default async function Perfil() {
   const ia = statusGemini();
-  const uso = db().prepare(`SELECT COUNT(*) chamadas, COALESCE(SUM(tokens_entrada), 0) entrada, COALESCE(SUM(tokens_saida), 0) saida,
-    COALESCE(SUM(custo_usd), 0) custo FROM uso_ia`).get() as { chamadas: number; entrada: number; saida: number; custo: number };
+  const comLogin = loginAtivo();
+  const sessao = comLogin ? await auth() : null;
+  const bancoRemoto = urlDoBanco().remoto;
+  const nuvem = armazenamentoNaNuvem();
+
+  async function sair() {
+    'use server';
+    await signOut({ redirectTo: '/entrar' });
+  }
+  const uso = (await (await db()).prepare(`SELECT COUNT(*) chamadas, COALESCE(SUM(tokens_entrada), 0) entrada, COALESCE(SUM(tokens_saida), 0) saida,
+    COALESCE(SUM(custo_usd), 0) custo FROM uso_ia`).get<{ chamadas: number; entrada: number; saida: number; custo: number }>())!;
   return (
-    <Pagina titulo="Perfil" subtitulo="Preferências deste computador. A versão local não tem login: quem usa é quem está na máquina." largura="max-w-3xl">
+    <Pagina
+      titulo="Perfil"
+      subtitulo={comLogin ? 'Sua conta e as preferências deste navegador.' : 'Preferências deste computador. A versão local não tem login: quem usa é quem está na máquina.'}
+      largura="max-w-3xl"
+    >
       <div className="space-y-6">
+        {comLogin && (
+          <Secao titulo="Conta" descricao="Login com o Google da empresa.">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="font-semibold">{sessao?.user?.name ?? 'Conectado'}</p>
+                <p className="font-mono text-sm text-slate-600 dark:text-slate-400">{sessao?.user?.email}</p>
+              </div>
+              <form action={sair}>
+                <Botao type="submit" variante="secundario">Sair</Botao>
+              </form>
+            </div>
+          </Secao>
+        )}
         <Secao titulo="Preferências" descricao="Valem só neste computador e neste navegador.">
           <div className="flex items-center justify-between gap-4">
             <div>
@@ -64,9 +92,24 @@ export default function Perfil() {
           </div>
         </Secao>
 
-        <Secao titulo="Dados" descricao="Banco, PDFs e arquivos gerados ficam nesta pasta. Para mudar, defina BATE_PDF_DADOS antes de iniciar o app.">
-          <code className={`block break-all ${codigo}`}>{pastaDeDados()}</code>
-        </Secao>
+        {bancoRemoto || nuvem ? (
+          <Secao titulo="Dados" descricao="Versão na nuvem: os dados ficam nos serviços configurados nas variáveis de ambiente.">
+            <dl className="grid gap-3 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="lastro-rotulo text-slate-500 dark:text-slate-400">Banco</dt>
+                <dd className="mt-0.5">{bancoRemoto ? 'Turso (libSQL)' : 'Arquivo local'}</dd>
+              </div>
+              <div>
+                <dt className="lastro-rotulo text-slate-500 dark:text-slate-400">PDFs e arquivos</dt>
+                <dd className="mt-0.5">{nuvem ? 'Vercel Blob (privado)' : 'Pasta local'}</dd>
+              </div>
+            </dl>
+          </Secao>
+        ) : (
+          <Secao titulo="Dados" descricao="Banco, PDFs e arquivos gerados ficam nesta pasta. Para mudar, defina BATE_PDF_DADOS antes de iniciar o app.">
+            <code className={`block break-all ${codigo}`}>{pastaDeDados()}</code>
+          </Secao>
+        )}
       </div>
     </Pagina>
   );

@@ -114,9 +114,10 @@ function compararCampo(base: string | null, leitura: string | null | undefined, 
 }
 
 /** Quadros do Anexo I: toda a amostra, com o que foi batido aqui (e o que veio batido do Bate Lastro). */
-export function montarAnexos(baseId: string | null): Record<Lado, LinhaAnexo[]> {
+export async function montarAnexos(baseId: string | null): Promise<Record<Lado, LinhaAnexo[]>> {
   if (!baseId) return { termo: [], lastro: [] };
-  const pendencias = listarPendencias(baseId);
+  const c = await db();
+  const pendencias = await listarPendencias(baseId);
   const porTitulo = new Map<number, Partial<Record<Lado, PendenciaLinha>>>();
   const titulos: PendenciaLinha['titulo'][] = [];
   for (const p of pendencias) {
@@ -124,10 +125,10 @@ export function montarAnexos(baseId: string | null): Record<Lado, LinhaAnexo[]> 
     porTitulo.get(p.titulo_id)![p.lado] = p;
   }
   // Títulos sem nenhuma pendência (raro) também entram na amostra.
-  const semPendencia = db().prepare(`SELECT t.* FROM titulos t WHERE t.base_id = ? AND NOT EXISTS (SELECT 1 FROM pendencias p WHERE p.titulo_id = t.id) ORDER BY t.id`).all(baseId) as PendenciaLinha['titulo'][];
+  const semPendencia = await c.prepare(`SELECT t.* FROM titulos t WHERE t.base_id = ? AND NOT EXISTS (SELECT 1 FROM pendencias p WHERE p.titulo_id = t.id) ORDER BY t.id`).all<PendenciaLinha['titulo']>(baseId);
   titulos.push(...semPendencia);
   titulos.sort((a, b) => a.id - b.id);
-  const notas = new Map((db().prepare('SELECT chave_nfe, status_nfe FROM notas_fiscais WHERE base_id = ?').all(baseId) as { chave_nfe: string; status_nfe: string }[]).map((n) => [n.chave_nfe, n.status_nfe]));
+  const notas = new Map((await c.prepare('SELECT chave_nfe, status_nfe FROM notas_fiscais WHERE base_id = ?').all<{ chave_nfe: string; status_nfe: string }>(baseId)).map((n) => [n.chave_nfe, n.status_nfe]));
 
   const anexos: Record<Lado, LinhaAnexo[]> = { termo: [], lastro: [] };
   for (const t of titulos) {
@@ -186,12 +187,12 @@ function resumir(anexos: Record<Lado, LinhaAnexo[]>) {
   return { verificacao, divergencias };
 }
 
-function amostraDaBase(baseId: string | null, dataBase: string, pl: number) {
+async function amostraDaBase(baseId: string | null, dataBase: string, pl: number) {
   const grupos: Record<string, { quantidade: number; valor: number }> = {
     [AMOSTRA_RECOMPRA]: { quantidade: 0, valor: 0 }, [AMOSTRA_VINCENDOS]: { quantidade: 0, valor: 0 }, [AMOSTRA_VENCIDOS]: { quantidade: 0, valor: 0 },
   };
   if (baseId) {
-    for (const t of db().prepare('SELECT tipo_recebivel, data_vencimento, valor_total FROM titulos WHERE base_id = ?').all(baseId) as { tipo_recebivel: string | null; data_vencimento: string | null; valor_total: string | null }[]) {
+    for (const t of await (await db()).prepare('SELECT tipo_recebivel, data_vencimento, valor_total FROM titulos WHERE base_id = ?').all<{ tipo_recebivel: string | null; data_vencimento: string | null; valor_total: string | null }>(baseId)) {
       const g = grupos[classificarAmostra(t.tipo_recebivel, t.data_vencimento, dataBase)];
       g.quantidade++;
       g.valor += Number(t.valor_total ?? 0) || 0;
@@ -203,15 +204,16 @@ function amostraDaBase(baseId: string | null, dataBase: string, pl: number) {
   return { itens, total_quantidade: totalQ, total_valor: totalV, percentual_pl: pl ? totalV / pl : 0 };
 }
 
-export function montarSnapshot(fundo: Fundo, carteira: Carteira | null, dataBase: string, base: { id: string; nome: string } | null, antecipada: boolean): Snapshot {
+export async function montarSnapshot(fundo: Fundo, carteira: Carteira | null, dataBase: string, base: { id: string; nome: string } | null, antecipada: boolean): Promise<Snapshot> {
   const pl = carteira ? patrimonioLiquido(carteira) : 0;
   const completas = carteira ? LINHAS_CARTEIRA.map((descricao) => {
     const valor = carteira.linhas[descricao] ?? 0;
     return { descricao, valor, percentual_pl: pl ? valor / pl : 0 };
   }) : [];
   const soma = completas.reduce((s, l) => s + l.valor, 0);
-  const amostra = amostraDaBase(base?.id ?? null, dataBase, pl);
-  const anexos = montarAnexos(base?.id ?? null);
+  const amostra = await amostraDaBase(base?.id ?? null, dataBase, pl);
+  const anexos = await montarAnexos(base?.id ?? null);
+  const blacklist = await resumoParaRelatorio(base?.id ?? null);
   const { verificacao, divergencias } = resumir(anexos);
   return {
     fundo: { id: fundo.id, nome: fundo.nome, cnpj: formatarCpfCnpj(fundo.cnpj), tipo: fundo.tipo === 'FIC_FIDC' ? 'FIC FIDC' : 'FIDC' },
@@ -240,7 +242,7 @@ export function montarSnapshot(fundo: Fundo, carteira: Carteira | null, dataBase
     verificacao,
     divergencias,
     anexos,
-    blacklist: resumoParaRelatorio(base?.id ?? null),
+    blacklist,
   };
 }
 

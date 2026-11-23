@@ -7,8 +7,8 @@ export const dynamic = 'force-dynamic';
 /** Situação do lote: documentos (situação, tipo, motivo) e as leituras extraídas. */
 export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   return responder(async () => {
-    iniciarFila();
+    await iniciarFila();
     const { id } = await ctx.params;
-    return Response.json(obterLote(id));
+    return Response.json(await obterLote(id));
   });
 }

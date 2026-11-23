@@ -14,7 +14,7 @@ export const maxDuration = 300;
 export async function POST(request: Request) {
   return responder(async () => {
     const f = await lerFormularioTipo(request);
-    const pdf = f.amostra ?? (f.documentoId ? pdfDoDocumento(f.documentoId).bytes : f.tipoId ? amostraDoTipo(f.tipoId) : null);
+    const pdf = f.amostra ?? (f.documentoId ? (await pdfDoDocumento(f.documentoId)).bytes : f.tipoId ? await amostraDoTipo(f.tipoId) : null);
     if (!pdf) throw new ErroDeUso('Envie um PDF de exemplo (ou escolha um documento da fila) para testar.');
     return Response.json(await testarExtracao(pdf, f.config, { cliente: obterClienteGemini, modelo: modeloGemini() }));
   });

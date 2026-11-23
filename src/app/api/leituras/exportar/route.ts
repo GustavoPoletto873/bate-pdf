@@ -8,7 +8,7 @@ export async function GET(request: Request) {
   return responder(async () => {
     const p = new URL(request.url).searchParams;
     const filtros = filtrosDaUrl(p);
-    const linhas = todasAsLeituras(filtros, { ordenarPor: p.get('ordenar') ?? undefined, direcao: p.get('direcao') ?? undefined });
+    const linhas = await todasAsLeituras(filtros, { ordenarPor: p.get('ordenar') ?? undefined, direcao: p.get('direcao') ?? undefined });
     if (!linhas.length) throw new ErroDeUso('Não há dados para exportar.');
     if (linhas.length > MAX_LINHAS_EXCEL) throw new ErroDeUso('São mais linhas do que cabem numa planilha do Excel. Use filtros para diminuir.');
     const colunas = (p.get('colunas') ?? '').split(',').filter(Boolean);

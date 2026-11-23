@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chaveDoPdf, lerArquivo } from '@/lib/arquivos';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
-import { db, pastaDeDados, pastaDePdfs } from '@/lib/db';
+import { db } from '@/lib/db';
 import { ErroDeUso } from '@/lib/api';
 import { ROTULO_LADO, type Lado } from '@/lib/campos';
 import { formatarCpfCnpj } from '@/lib/texto';
@@ -42,25 +41,25 @@ class NomesUnicos {
 }
 
 export async function exportarDocumentos(baseId: string, escopo: Escopo = 'vinculados'): Promise<{ nome: string; zip: Uint8Array }> {
-  const c = db();
-  const base = c.prepare('SELECT id, nome, nome_fundo, cnpj_fundo, data_referencia FROM bases WHERE id = ?').get(baseId) as
+  const c = await db();
+  const base = await c.prepare('SELECT id, nome, nome_fundo, cnpj_fundo, data_referencia FROM bases WHERE id = ?').get(baseId) as
     { id: string; nome: string; nome_fundo: string | null; cnpj_fundo: string | null; data_referencia: string | null } | undefined;
   if (!base) throw new ErroDeUso('Base não encontrada.', 404);
 
   // Vínculos de cada PDF (e por lado), para o índice e para o escopo "vinculados".
-  const vinculos = c.prepare(`SELECT v.pdf_id, v.pagina, v.tipo_match, v.criado_em, p.lado, t.numero_documento, t.sacado_nome, t.valor_total, t.id_base_origem, f.nome_arquivo
+  const vinculos = await c.prepare(`SELECT v.pdf_id, v.pagina, v.tipo_match, v.criado_em, p.lado, t.numero_documento, t.sacado_nome, t.valor_total, t.id_base_origem, f.nome_arquivo
       FROM vinculos v JOIN pendencias p ON p.id = v.pendencia_id JOIN titulos t ON t.id = p.titulo_id LEFT JOIN pdfs f ON f.id = v.pdf_id
      WHERE p.base_id = ? ORDER BY t.id, p.lado`).all(baseId) as
     { pdf_id: number | null; pagina: number | null; tipo_match: string; criado_em: string; lado: Lado; numero_documento: string | null; sacado_nome: string | null; valor_total: string | null; id_base_origem: number | null; nome_arquivo: string | null }[];
   const confirmadosPorPdf = new Map<number, number>();
   for (const v of vinculos) if (v.pdf_id) confirmadosPorPdf.set(v.pdf_id, (confirmadosPorPdf.get(v.pdf_id) ?? 0) + 1);
-  const leiturasPorPdf = new Map((c.prepare('SELECT pdf_id, COUNT(*) n FROM leituras WHERE base_id = ? AND pdf_id IS NOT NULL GROUP BY pdf_id').all(baseId) as { pdf_id: number; n: number }[]).map((l) => [l.pdf_id, l.n]));
+  const leiturasPorPdf = new Map((await c.prepare('SELECT pdf_id, COUNT(*) n FROM leituras WHERE base_id = ? AND pdf_id IS NOT NULL GROUP BY pdf_id').all(baseId) as { pdf_id: number; n: number }[]).map((l) => [l.pdf_id, l.n]));
 
-  const anexos = c.prepare(`SELECT d.id, d.pdf_id, d.caminho, d.nome_arquivo, d.extensao, d.arquivo, d.tipo_documento, d.status, COALESCE(o.nome, o.chave) AS operacao
+  const anexos = await c.prepare(`SELECT d.id, d.pdf_id, d.caminho, d.nome_arquivo, d.extensao, d.arquivo, d.tipo_documento, d.status, COALESCE(o.nome, o.chave) AS operacao
       FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id LEFT JOIN anexo_operacoes o ON o.id = d.operacao_id
      WHERE l.base_id = ? ORDER BY operacao, d.caminho`).all(baseId) as
     { id: number; pdf_id: number | null; caminho: string; nome_arquivo: string; extensao: string | null; arquivo: string | null; tipo_documento: string | null; status: string; operacao: string | null }[];
-  const pdfs = c.prepare('SELECT id, nome_arquivo, caminho_relativo, sha256, tamanho FROM pdfs WHERE base_id = ? ORDER BY nome_arquivo').all(baseId) as
+  const pdfs = await c.prepare('SELECT id, nome_arquivo, caminho_relativo, sha256, tamanho FROM pdfs WHERE base_id = ? ORDER BY nome_arquivo').all(baseId) as
     { id: number; nome_arquivo: string; caminho_relativo: string | null; sha256: string; tamanho: number }[];
   const pdfPorId = new Map(pdfs.map((p) => [p.id, p]));
 
@@ -86,17 +85,14 @@ export async function exportarDocumentos(baseId: string, escopo: Escopo = 'vincu
     hashes.push(`${sha}  ${final}`);
     itens.push({ categoria, caminho: final, ...meta, tamanho: bytes.length, sha256: sha, situacao: 'Incluído' });
   };
-  const lerPdf = (sha: string) => {
-    const p = join(pastaDePdfs(baseId), `${sha}.pdf`);
-    return existsSync(p) ? new Uint8Array(readFileSync(p)) : null;
-  };
+  const lerPdf = (sha: string) => lerArquivo(chaveDoPdf(baseId, sha));
 
   const usadoNoAnexo = new Set<number>();
   for (const d of anexos) {
     const pdf = d.pdf_id ? pdfPorId.get(d.pdf_id) : null;
     if (escopo === 'vinculados' && !(d.pdf_id && confirmadosPorPdf.get(d.pdf_id))) continue;
     if (d.pdf_id) usadoNoAnexo.add(d.pdf_id);
-    const bytes = pdf ? lerPdf(pdf.sha256) : d.arquivo && existsSync(join(/*turbopackIgnore: true*/ pastaDeDados(), d.arquivo)) ? new Uint8Array(readFileSync(join(/*turbopackIgnore: true*/ pastaDeDados(), d.arquivo))) : null;
+    const bytes = pdf ? await lerPdf(pdf.sha256) : d.arquivo ? await lerArquivo(d.arquivo) : null;
     incluir('Anexo da operação (original)', `OPERACOES/${segmento(d.operacao ?? 'sem_operacao')}/${caminhoSeguro(d.caminho)}`, bytes, {
       nome: d.nome_arquivo, operacao: d.operacao ?? '', tipo: d.tipo_documento ?? '', leituras: d.pdf_id ? leiturasPorPdf.get(d.pdf_id) ?? 0 : 0, confirmados: d.pdf_id ? confirmadosPorPdf.get(d.pdf_id) ?? 0 : 0,
     });
@@ -104,11 +100,11 @@ export async function exportarDocumentos(baseId: string, escopo: Escopo = 'vincu
   for (const p of pdfs) {
     if (usadoNoAnexo.has(p.id)) continue;
     if (escopo === 'vinculados' && !confirmadosPorPdf.get(p.id)) continue;
-    incluir('Documento lido no matching', `DOCUMENTOS_LIDOS/${caminhoSeguro(p.caminho_relativo || p.nome_arquivo)}`, lerPdf(p.sha256), {
+    incluir('Documento lido no matching', `DOCUMENTOS_LIDOS/${caminhoSeguro(p.caminho_relativo || p.nome_arquivo)}`, await lerPdf(p.sha256), {
       nome: p.nome_arquivo, operacao: '', tipo: '', leituras: leiturasPorPdf.get(p.id) ?? 0, confirmados: confirmadosPorPdf.get(p.id) ?? 0,
     });
   }
-  const notas = c.prepare('SELECT chave_nfe, status_nfe, xml_content FROM notas_fiscais WHERE base_id = ? AND xml_content IS NOT NULL ORDER BY chave_nfe').all(baseId) as { chave_nfe: string; status_nfe: string; xml_content: string }[];
+  const notas = await c.prepare('SELECT chave_nfe, status_nfe, xml_content FROM notas_fiscais WHERE base_id = ? AND xml_content IS NOT NULL ORDER BY chave_nfe').all(baseId) as { chave_nfe: string; status_nfe: string; xml_content: string }[];
   for (const n of notas) {
     incluir('XML NF-e', `NOTAS_FISCAIS/${segmento(n.chave_nfe)}.xml`, new TextEncoder().encode(n.xml_content), { nome: `${n.chave_nfe}.xml`, operacao: '', tipo: `NF-e ${n.status_nfe}`, leituras: 0, confirmados: 0 });
   }

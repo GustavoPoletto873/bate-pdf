@@ -1,12 +1,13 @@
 import { ErroDeUso, responder } from '@/lib/api';
 import { expandirZip, ZipRecusado } from '@/lib/anexo/zip';
+import { lerFormulario } from '@/lib/envio';
 
 export const dynamic = 'force-dynamic';
 
 /** Conteúdo de um ZIP para a prévia do agrupamento (mesmos limites do processamento). */
 export async function POST(request: Request) {
   return responder(async () => {
-    const form = await request.formData();
+    const form = await lerFormulario(request);
     const arquivo = form.get('arquivo');
     if (!(arquivo instanceof File)) throw new ErroDeUso('Envie o arquivo ZIP.');
     try {

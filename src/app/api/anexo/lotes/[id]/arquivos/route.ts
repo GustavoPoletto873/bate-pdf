@@ -1,5 +1,6 @@
 import { ErroDeUso, responder } from '@/lib/api';
 import { adicionarArquivos } from '@/lib/anexo/lotes';
+import { lerFormulario } from '@/lib/envio';
 
 export const dynamic = 'force-dynamic';
 
@@ -7,7 +8,7 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: Request, ctx: { params: Promise<{ id: string }> }) {
   return responder(async () => {
     const { id } = await ctx.params;
-    const form = await request.formData();
+    const form = await lerFormulario(request);
     const arquivos = form.getAll('arquivos').filter((a): a is File => a instanceof File);
     const caminhos = form.getAll('caminhos').map(String);
     if (!arquivos.length) throw new ErroDeUso('Nenhum arquivo enviado.');

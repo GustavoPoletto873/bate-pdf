@@ -12,6 +12,6 @@ export const dynamic = 'force-dynamic';
 export async function GET(_request: Request, ctx: RouteContext<'/api/amostragem/[id]'>) {
   return responder(async () => {
     const { id } = await ctx.params;
-    return Response.json(obter(idDaRota(id)));
+    return Response.json(await obter(idDaRota(id)));
   });
 }

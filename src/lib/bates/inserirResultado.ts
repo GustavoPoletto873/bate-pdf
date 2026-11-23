@@ -1,10 +1,10 @@
 import ExcelJS from 'exceljs';
-import { db } from '@/lib/db';
+import { db, emBlocos, reservarIds, transacao, type Banco, type Valor } from '@/lib/db';
 import { ErroDeUso } from '@/lib/api';
 import { CAMPOS, type CampoId, type Lado, type Veredito } from '@/lib/campos';
 import { vereditoAutomatico, vereditoDoCampo, type LeituraCampos } from '@/lib/bates/comparacao';
-import { inserirLeitura, tipoRecebivelDoLado, type LeituraLinha } from '@/lib/bates/leituras';
-import { COLUNAS_TITULO, criarVinculoDeLeitura, tituloDaLinha, type TituloDaBase } from '@/lib/bates/preMatches';
+import { COLUNA_DA_LEITURA, comandoDaLeitura, tipoRecebivelDoLado, type LeituraLinha } from '@/lib/bates/leituras';
+import { COLUNAS_TITULO, comandosDoVinculo, tituloDaLinha, type TituloDaBase } from '@/lib/bates/preMatches';
 
 /**
  * "Inserir Resultado" da Gestão de Bates (importar_resultado_matching_service.py): grava nesta
@@ -18,7 +18,7 @@ import { COLUNAS_TITULO, criarVinculoDeLeitura, tituloDaLinha, type TituloDaBase
  * - O título é achado pelo ID_BASE (o id do Bate Lastro, guardado em titulos.id_base_origem);
  *   senão pelo nº do documento + valor nominal, desde que case com um título só.
  *
- * Prévia e gravação passam pelo mesmo código; a prévia termina em ROLLBACK.
+ * Prévia e gravação passam pelo mesmo código; a prévia só não grava (nenhuma escrita é feita).
  */
 
 export const MAX_BYTES_PLANILHA = 20 * 1024 * 1024;
@@ -231,11 +231,10 @@ type EstadoPendencia = {
   pre_bate: { id: number; leitura_id: number; similaridade: number; leitura_numero: string | null } | null;
 };
 
-function processar(baseId: string, nomeArquivo: string, linhas: LinhaPlanilha[], cnpjs: Set<string>, gravar: boolean): ResumoInsercao {
-  const c = db();
-  const titulos = c.prepare(`SELECT ${COLUNAS_TITULO} FROM titulos t WHERE t.base_id = ? ORDER BY t.id`).all(baseId) as Record<string, unknown>[];
+async function processar(c: Banco, baseId: string, nomeArquivo: string, linhas: LinhaPlanilha[], cnpjs: Set<string>, gravar: boolean): Promise<ResumoInsercao> {
+  const titulos = await c.prepare(`SELECT ${COLUNAS_TITULO} FROM titulos t WHERE t.base_id = ? ORDER BY t.id`).all(baseId);
   if (!titulos.length) throw new ErroDeUso('Base não encontrada.', 404);
-  const base = c.prepare('SELECT cnpj_fundo FROM bases WHERE id = ?').get(baseId) as { cnpj_fundo: string | null } | undefined;
+  const base = await c.prepare('SELECT cnpj_fundo FROM bases WHERE id = ?').get<{ cnpj_fundo: string | null }>(baseId);
   const cnpjsBase = new Set([...titulos.map((t) => String(t.t_cnpj_fundo ?? '')), base?.cnpj_fundo ?? '']
     .map((x) => x.replace(/\D/g, '')).filter((x) => x.length === 14));
   if (!cnpjs.size) {
@@ -284,18 +283,30 @@ function processar(baseId: string, nomeArquivo: string, linhas: LinhaPlanilha[],
     termo: Object.fromEntries(CASOS.map((k) => [k, 0])) as Record<Caso, number>,
     lastro: Object.fromEntries(CASOS.map((k) => [k, 0])) as Record<Caso, number>,
   };
-  const estado = c.prepare(`SELECT p.id, p.situacao,
+  // Estado de todas as pendências da base numa consulta só (não uma por título).
+  const estado = new Map<string, Record<string, unknown>>();
+  for (const r of await c.prepare(`SELECT p.id, p.titulo_id, p.lado, p.situacao,
       v.id AS v_id, v.marcacoes AS v_marcacoes, v.leitura AS v_leitura,
       pm.id AS pm_id, pm.leitura_id AS pm_leitura_id, pm.similaridade AS pm_similaridade, l.numero_documento AS pm_numero
     FROM pendencias p LEFT JOIN vinculos v ON v.pendencia_id = p.id
     LEFT JOIN pre_matches pm ON pm.pendencia_id = p.id LEFT JOIN leituras l ON l.id = pm.leitura_id
-    WHERE p.titulo_id = ? AND p.lado = ?`);
+    WHERE p.base_id = ? ORDER BY p.id, pm.id`).all(baseId)) {
+    const k = `${r.titulo_id}|${r.lado}`;
+    if (!estado.has(k)) estado.set(k, r);
+  }
   const ts = new Date().toISOString();
+
+  // Primeiro decide o que fazer com cada título; depois grava tudo num lote.
+  type Acao =
+    | { tipo: 'marcacoes'; vinculoId: number; marcacoes: string }
+    | { tipo: 'pre_bate'; pendenciaId: number; lado: Lado; titulo: TituloDaBase; leituraId: number; similaridade: number; salvas: Partial<Record<CampoId, Veredito>> }
+    | { tipo: 'novo'; pendenciaId: number | undefined; lado: Lado; titulo: TituloDaBase; linha: LinhaPlanilha };
+  const acoes: Acao[] = [];
 
   for (const { titulo, linha } of [...unicas.values()].sort((a, b) => a.titulo.id - b.titulo.id)) {
     const lado = ABAS[linha.aba];
     const contagem = casos[lado];
-    const r = estado.get(titulo.id, lado) as Record<string, unknown> | undefined;
+    const r = estado.get(`${titulo.id}|${lado}`);
     const e: EstadoPendencia | null = r ? {
       id: r.id as number, situacao: r.situacao as string,
       vinculo: r.v_id ? { id: r.v_id as number, marcacoes: r.v_marcacoes as string, leitura: r.v_leitura as string } : null,
@@ -310,7 +321,7 @@ function processar(baseId: string, nomeArquivo: string, linhas: LinhaPlanilha[],
         .some(([campo, v]) => vereditoDoCampo(salvas, campo, vereditoAutomatico(campo, titulo, leitura)) !== v);
       if (mudou) {
         contagem.marcacoes_atualizadas++;
-        if (gravar) c.prepare('UPDATE vinculos SET marcacoes = ? WHERE id = ?').run(JSON.stringify({ ...salvas, ...linha.marcacoes }), e.vinculo.id);
+        acoes.push({ tipo: 'marcacoes', vinculoId: e.vinculo.id, marcacoes: JSON.stringify({ ...salvas, ...linha.marcacoes }) });
       } else contagem.ja_batido_igual++;
       continue;
     }
@@ -324,34 +335,15 @@ function processar(baseId: string, nomeArquivo: string, linhas: LinhaPlanilha[],
     const escolhido = e?.pre_bate && (!numero || numeroNormalizado(e.pre_bate.leitura_numero) === numero) ? e.pre_bate : null;
     if (e && escolhido) {
       contagem.pre_bate_confirmado++;
-      if (gravar) {
-        const leitura = c.prepare('SELECT * FROM leituras WHERE id = ?').get(escolhido.leitura_id) as LeituraLinha;
-        criarVinculoDeLeitura(baseId, {
-          pendencia_id: e.id, lado, titulo, leitura, tipo_match: 'automatico', origem: 'pre_bate',
-          similaridade: escolhido.similaridade, salvas: linha.marcacoes, ts,
-        });
-      }
+      acoes.push({ tipo: 'pre_bate', pendenciaId: e.id, lado, titulo, leituraId: escolhido.leitura_id, similaridade: escolhido.similaridade, salvas: linha.marcacoes });
       continue;
     }
     contagem.bate_criado++;
-    if (!gravar) continue;
-    // Pré-bate de outro documento: descartado (a leitura volta a ficar livre).
-    let pendenciaId = e?.id;
-    if (pendenciaId === undefined) {
-      // Título que não tinha este lado para conferir nesta base.
-      pendenciaId = Number(c.prepare("INSERT INTO pendencias (base_id, titulo_id, lado, situacao) VALUES (?, ?, ?, 'pendente')").run(baseId, titulo.id, lado).lastInsertRowid);
-    }
-    const leituraId = inserirLeitura(c, {
-      base_id: baseId, pdf_id: null, tipo_recebivel: tipoRecebivelDoLado(lado, titulo.tipo_recebivel),
-      origem: 'planilha', campos: linha.leitura, lida_em: ts,
-    });
-    const leitura = c.prepare('SELECT * FROM leituras WHERE id = ?').get(leituraId) as LeituraLinha;
-    criarVinculoDeLeitura(baseId, {
-      pendencia_id: pendenciaId, lado, titulo, leitura, tipo_match: 'manual', origem: 'planilha',
-      similaridade: null, salvas: linha.marcacoes, ts,
-    });
+    // Pré-bate de outro documento: descartado ao criar o vínculo (a leitura volta a ficar livre).
+    acoes.push({ tipo: 'novo', pendenciaId: e?.id, lado, titulo, linha });
   }
-  if (gravar) c.prepare('UPDATE bases SET atualizado_em = ? WHERE id = ?').run(ts, baseId);
+
+  if (gravar) await gravarAcoes(c, baseId, acoes, ts);
 
   return {
     arquivo: nomeArquivo,
@@ -362,20 +354,59 @@ function processar(baseId: string, nomeArquivo: string, linhas: LinhaPlanilha[],
     nao_encontrados: naoEncontrados,
     total_a_gravar: (['termo', 'lastro'] as Lado[]).reduce((s, l) => s + casos[l].bate_criado + casos[l].pre_bate_confirmado + casos[l].marcacoes_atualizadas, 0),
   };
+
+  /** Grava as ações (dentro da transação): ids de pendências e leituras novas reservados de antemão. */
+  async function gravarAcoes(tx: Banco, idBase: string, lista: Acao[], quando: string) {
+    const comandos: { sql: string; args: Valor[] }[] = [];
+    // Leituras dos pré-bates confirmados, de uma vez.
+    const leituras = new Map<number, LeituraLinha>();
+    const ids = lista.flatMap((a) => (a.tipo === 'pre_bate' ? [a.leituraId] : []));
+    for (const bloco of emBlocos(ids)) {
+      for (const l of await tx.prepare(`SELECT * FROM leituras WHERE id IN (${bloco.map(() => '?').join(',')})`).all<LeituraLinha>(...bloco)) leituras.set(l.id, l);
+    }
+    const novos = lista.filter((a) => a.tipo === 'novo');
+    let pendenciaId = await reservarIds(tx, 'pendencias', novos.length);
+    let leituraId = await reservarIds(tx, 'leituras', novos.length);
+    for (const a of lista) {
+      if (a.tipo === 'marcacoes') {
+        comandos.push({ sql: 'UPDATE vinculos SET marcacoes = ? WHERE id = ?', args: [a.marcacoes, a.vinculoId] });
+      } else if (a.tipo === 'pre_bate') {
+        comandos.push(...comandosDoVinculo({
+          pendencia_id: a.pendenciaId, lado: a.lado, titulo: a.titulo, leitura: leituras.get(a.leituraId)!, tipo_match: 'automatico', origem: 'pre_bate',
+          similaridade: a.similaridade, salvas: a.salvas, ts: quando,
+        }));
+      } else {
+        let pid = a.pendenciaId;
+        if (pid === undefined) {
+          // Título que não tinha este lado para conferir nesta base.
+          pid = pendenciaId++;
+          comandos.push({ sql: "INSERT INTO pendencias (id, base_id, titulo_id, lado, situacao) VALUES (?, ?, ?, ?, 'pendente')", args: [pid, idBase, a.titulo.id, a.lado] });
+        }
+        const id = leituraId++;
+        comandos.push(comandoDaLeitura({
+          base_id: idBase, pdf_id: null, tipo_recebivel: tipoRecebivelDoLado(a.lado, a.titulo.tipo_recebivel),
+          origem: 'planilha', campos: a.linha.leitura, lida_em: quando,
+        }, id));
+        // A leitura recém-gravada, montada aqui mesmo (sem ir ao banco buscá-la).
+        const leitura: Partial<LeituraLinha> & { id: number } = { id, pdf_id: null };
+        for (const [campo, coluna] of Object.entries(COLUNA_DA_LEITURA) as [CampoId, keyof LeituraLinha][]) {
+          (leitura as Record<string, unknown>)[coluna] = a.linha.leitura[campo] ?? null;
+        }
+        comandos.push(...comandosDoVinculo({
+          pendencia_id: pid, lado: a.lado, titulo: a.titulo, leitura, tipo_match: 'manual', origem: 'planilha',
+          similaridade: null, salvas: a.linha.marcacoes, ts: quando,
+        }));
+      }
+    }
+    comandos.push({ sql: 'UPDATE bases SET atualizado_em = ? WHERE id = ?', args: [quando, idBase] });
+    for (const bloco of emBlocos(comandos, 200)) await tx.lote(bloco);
+  }
 }
 
-/** Lê a planilha e grava (ou só simula: a prévia passa pelo mesmo código e desfaz no fim). */
+/** Lê a planilha e grava (ou só simula: a prévia passa pelo mesmo código, sem escrever nada). */
 export async function inserirResultado(baseId: string, conteudo: Uint8Array, nomeArquivo: string, simular: boolean): Promise<ResumoInsercao> {
   const { linhas, cnpjs } = await lerPlanilhaResultado(conteudo, nomeArquivo);
   if (!linhas.length) throw new ErroDeUso('A planilha não tem nenhum título.', 422);
-  const c = db();
-  c.exec('BEGIN IMMEDIATE');
-  try {
-    const resumo = processar(baseId, nomeArquivo, linhas, cnpjs, !simular);
-    c.exec(simular ? 'ROLLBACK' : 'COMMIT');
-    return resumo;
-  } catch (e) {
-    c.exec('ROLLBACK');
-    throw e;
-  }
+  if (simular) return processar(await db(), baseId, nomeArquivo, linhas, cnpjs, false);
+  return transacao((tx) => processar(tx, baseId, nomeArquivo, linhas, cnpjs, true));
 }

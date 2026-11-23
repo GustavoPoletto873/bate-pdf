@@ -12,6 +12,6 @@ export async function POST(request: Request, ctx: RouteContext<'/api/bases/[id]/
       if (!CAMPO_POR_ID[op.campo]) throw new ErroDeUso(`Campo desconhecido: ${op.campo}`);
       if (op.valor !== null && !['V', 'D', 'P'].includes(op.valor)) throw new ErroDeUso('Marcação deve ser V, D ou P.');
     }
-    return Response.json(salvarMarcacoes(id, operacoes));
+    return Response.json(await salvarMarcacoes(id, operacoes));
   });
 }

@@ -8,10 +8,10 @@ export const dynamic = 'force-dynamic';
  * → contagem por status (com busca e período) e os cartões do status pedido, 16 por página.
  */
 export async function GET(request: Request) {
-  return responder(() => {
+  return responder(async () => {
     const p = new URL(request.url).searchParams;
     const tipo = p.get('tipo');
-    return Response.json(listarAuditorias({
+    return Response.json(await listarAuditorias({
       busca: p.get('busca'),
       tipo: tipo === 'trimestre' || tipo === 'data' ? tipo : null,
       ano: p.get('ano'),

@@ -46,8 +46,8 @@ export type PainelInicio = {
   em_andamento: (CartaoAuditoria & { quando: string | null })[];
 };
 
-export function montarPainelInicio(agora = new Date()): PainelInicio {
-  const { resumo, em_andamento } = painelInicial(4);
+export async function montarPainelInicio(agora = new Date()): Promise<PainelInicio> {
+  const { resumo, em_andamento } = await painelInicial(4);
   return {
     saudacao: saudacao(agora),
     data: agora.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' }).replace(/^./, (c) => c.toUpperCase()),
