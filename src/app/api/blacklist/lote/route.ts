@@ -8,6 +8,6 @@ export async function POST(request: Request) {
   return responder(async () => {
     const { itens } = await lerJson<{ itens?: { nome?: string; documento?: string }[] }>(request);
     if (!Array.isArray(itens)) throw new ErroDeUso('Nenhum item informado.');
-    return Response.json(criarLote(itens), { status: 201 });
+    return Response.json(await criarLote(itens), { status: 201 });
   });
 }

@@ -8,8 +8,8 @@ export const dynamic = 'force-dynamic';
 export async function GET(_req: Request, ctx: RouteContext<'/api/bases/[id]/bates'>) {
   return responder(async () => {
     const { id } = await ctx.params;
-    const base = obterBase(id);
+    const base = await obterBase(id);
     if (!base) throw new ErroDeUso('Base não encontrada. Volte para Bates e escolha a base de novo.', 404);
-    return Response.json({ base, painel: painelDaBase(id) });
+    return Response.json({ base, painel: await painelDaBase(id) });
   });
 }

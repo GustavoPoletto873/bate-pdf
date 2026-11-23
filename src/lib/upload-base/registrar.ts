@@ -25,8 +25,8 @@ export type UploadsRecentes = {
   data_referencia: string;
 };
 
-function exigirFundo(fundoId: number): Fundo {
-  const fundo = Number.isInteger(fundoId) ? obterFundo(fundoId) : null;
+async function exigirFundo(fundoId: number): Promise<Fundo> {
+  const fundo = Number.isInteger(fundoId) ? await obterFundo(fundoId) : null;
   if (!fundo) throw new ErroDeUso('O fundo escolhido não está cadastrado. Atualize a página e escolha o fundo de novo.', 404);
   return fundo;
 }
@@ -40,16 +40,16 @@ function exigirData(data: string | null | undefined): string {
  * verificar_uploads_recentes: bases do mesmo fundo (pelo cadastro ou pelo CNPJ) com a data de
  * referência no mesmo período, criadas nos últimos `minutos`. Lá contava linhas; aqui, bases.
  */
-export function uploadsRecentes(dados: { fundo_id: number; data_referencia: string; modo: ModoReferencia; minutos?: number; agora?: Date }): UploadsRecentes {
-  const fundo = exigirFundo(dados.fundo_id);
+export async function uploadsRecentes(dados: { fundo_id: number; data_referencia: string; modo: ModoReferencia; minutos?: number; agora?: Date }): Promise<UploadsRecentes> {
+  const fundo = await exigirFundo(dados.fundo_id);
   const data = normalizarDataReferencia(exigirData(dados.data_referencia), dados.modo);
   const [inicio, fim] = intervaloReferencia(data, dados.modo);
   const minutos = dados.minutos ?? 30;
   const agora = (dados.agora ?? new Date()).getTime();
   const desde = new Date(agora - minutos * 60_000).toISOString();
-  const r = db().prepare(`SELECT COUNT(*) n, MAX(criado_em) ultimo, MIN(criado_em) primeiro FROM bases
+  const r = (await (await db()).prepare(`SELECT COUNT(*) n, MAX(criado_em) ultimo, MIN(criado_em) primeiro FROM bases
     WHERE (fundo_id = ? OR cnpj_fundo = ?) AND data_referencia BETWEEN ? AND ? AND criado_em >= ?`)
-    .get(fundo.id, fundo.cnpj, inicio, fim, desde) as { n: number; ultimo: string | null; primeiro: string | null };
+    .get<{ n: number; ultimo: string | null; primeiro: string | null }>(fundo.id, fundo.cnpj, inicio, fim, desde))!;
   return {
     tem_uploads_recentes: r.n > 0,
     quantidade_uploads: r.n,
@@ -75,11 +75,11 @@ export type BaseRegistrada = {
 
 export type ResultadoRegistro = { ok: true; base: BaseRegistrada } | { ok: false; erros: ErroValidacao[] };
 
-function concluir(baseId: string, extra: Partial<BaseRegistrada> = {}): BaseRegistrada {
+async function concluir(baseId: string, extra: Partial<BaseRegistrada> = {}): Promise<BaseRegistrada> {
   // BlackList: confere a base recém-gravada na hora, para o aviso sair junto com a conclusão.
-  varrerBase(baseId);
-  const blacklist = alertaDaBase(baseId);
-  const base = obterBase(baseId)!;
+  await varrerBase(baseId);
+  const blacklist = await alertaDaBase(baseId);
+  const base = (await obterBase(baseId))!;
   return {
     base_id: baseId,
     nome: base.nome,
@@ -100,13 +100,13 @@ export async function registrarBase(dados: {
   arquivo: { nome: string; conteudo: Uint8Array };
   mapeamento?: Record<string, string> | null;
 }): Promise<ResultadoRegistro> {
-  const fundo = exigirFundo(dados.fundo_id);
+  const fundo = await exigirFundo(dados.fundo_id);
   // TRIMESTRE grava o último dia do trimestre; DATA_REFERENCIA, a data informada.
   const data = normalizarDataReferencia(exigirData(dados.data_referencia), dados.modo);
   const tabela = await lerTabela(dados.arquivo.conteudo, dados.arquivo.nome);
   const r = aplicarMapeamento(tabela, dados.mapeamento);
   if (!r.ok) return r;
-  const id = criarBase({
+  const id = await criarBase({
     nome: `${fundo.nome} — ${rotuloReferencia(data, dados.modo)}`,
     nome_fundo: fundo.nome,
     cnpj_fundo: fundo.cnpj,
@@ -118,7 +118,7 @@ export async function registrarBase(dados: {
     fundo_id: fundo.id,
     modo_referencia: dados.modo,
   });
-  return { ok: true, base: concluir(id, { vencimento: r.vencimento }) };
+  return { ok: true, base: await concluir(id, { vencimento: r.vencimento }) };
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +148,7 @@ async function lerResultados(conteudo: Uint8Array, nomeArquivo: string) {
 export async function previaResultados(conteudo: Uint8Array, nomeArquivo: string): Promise<PreviaResultados> {
   const lido = await lerResultados(conteudo, nomeArquivo);
   const conta = (lado: 'termo' | 'lastro', s: string) => lido.titulos.filter((t) => t.lados[lado] === s).length;
-  const fundo = lido.cnpj_fundo ? fundoPorCnpj(lido.cnpj_fundo) : null;
+  const fundo = lido.cnpj_fundo ? await fundoPorCnpj(lido.cnpj_fundo) : null;
   return {
     titulos: lido.titulos.length,
     pendentes: { termo: conta('termo', 'pendente'), lastro: conta('lastro', 'pendente') },
@@ -171,7 +171,7 @@ export async function registrarResultados(dados: {
   modo: ModoReferencia;
 }): Promise<BaseRegistrada> {
   const lido = await lerResultados(dados.arquivo.conteudo, dados.arquivo.nome);
-  const fundo = dados.fundo_id ? exigirFundo(dados.fundo_id) : (lido.cnpj_fundo ? fundoPorCnpj(lido.cnpj_fundo) : null);
+  const fundo = dados.fundo_id ? await exigirFundo(dados.fundo_id) : (lido.cnpj_fundo ? await fundoPorCnpj(lido.cnpj_fundo) : null);
   const avisos = [...lido.avisos];
   if (fundo && lido.cnpj_fundo && fundo.cnpj !== lido.cnpj_fundo) {
     avisos.push(`O CNPJ da planilha (${lido.cnpj_fundo}) é diferente do CNPJ do fundo escolhido (${fundo.cnpj}). A base ficou com o CNPJ do fundo.`);
@@ -180,7 +180,7 @@ export async function registrarResultados(dados: {
   if (dados.data_referencia) data = normalizarDataReferencia(exigirData(dados.data_referencia), dados.modo);
   const nomeFundo = fundo?.nome ?? lido.nome_fundo;
   const nome = [nomeFundo ?? dados.arquivo.nome.replace(/\.[^.]+$/, ''), data ? rotuloReferencia(data, dados.modo) : null].filter(Boolean).join(' — ');
-  const id = criarBase({
+  const id = await criarBase({
     nome,
     nome_fundo: nomeFundo,
     cnpj_fundo: fundo?.cnpj ?? lido.cnpj_fundo,
@@ -192,5 +192,5 @@ export async function registrarResultados(dados: {
     fundo_id: fundo?.id ?? null,
     modo_referencia: dados.modo,
   });
-  return concluir(id, { avisos });
+  return await concluir(id, { avisos });
 }

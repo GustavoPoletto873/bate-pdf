@@ -85,7 +85,7 @@ describe('configuração do tipo treinado', () => {
 describe('testar → salvar', () => {
   test('salvar exige teste da mesma configuração; editar exige a versão certa', async () => {
     const cfg = configMutuo();
-    expect(() => treino.criarTipo(cfg, PDF)).toThrow(/teste de extração/);
+    await expect(treino.criarTipo(cfg, PDF)).rejects.toThrow(/teste de extração/);
 
     const extracao = { NU_DOCUMENTO: 'MR-1', NOME_SACADO: 'JOAO DA SILVA', relacaoParcelas: [
       { VALOR_NOMINAL: 100, DATA_VENCIMENTO_ORIGINAL: '2026-10-10', NUMERO_PARCELA: 1, QUANTIDADE_PARCELAS: 2 },
@@ -97,20 +97,20 @@ describe('testar → salvar', () => {
     expect(r.linhas[1]).toMatchObject({ NU_DOCUMENTO: 'MR-1', NUMERO_PARCELA: 2 });
     expect(pedidos[0].prompt).toMatch(/Contrato de Mútuo Rural/);
 
-    const tipo = treino.criarTipo(cfg, PDF);
+    const tipo = await treino.criarTipo(cfg, PDF);
     expect(tipo).toMatchObject({ slug: 'lastro_mutuo_rural', versao: 1, tem_amostra: true, ativo: true });
-    expect(treino.tiposAtivos().map((t) => t.slug)).toEqual(['lastro_mutuo_rural']);
+    expect((await treino.tiposAtivos()).map((t) => t.slug)).toEqual(['lastro_mutuo_rural']);
 
     // Mudou a descrição: precisa testar de novo.
     const outra = { ...cfg, descricao_identificacao: 'Outra descrição do contrato de mútuo rural.' };
-    expect(() => treino.atualizarTipo(tipo.id, outra, 1)).toThrow(/teste de extração/);
+    await expect(treino.atualizarTipo(tipo.id, outra, 1)).rejects.toThrow(/teste de extração/);
     await treino.testarExtracao(PDF, outra, { cliente: async () => clienteFalso(extracao), modelo: 'gemini-3.1-flash-lite' });
-    expect(() => treino.atualizarTipo(tipo.id, outra, 7)).toThrow(/alterado em outro lugar/);
-    expect(treino.atualizarTipo(tipo.id, outra, 1).versao).toBe(2);
+    await expect(treino.atualizarTipo(tipo.id, outra, 7)).rejects.toThrow(/alterado em outro lugar/);
+    expect((await treino.atualizarTipo(tipo.id, outra, 1)).versao).toBe(2);
 
-    treino.excluirTipo(tipo.id);
-    expect(treino.tiposAtivos()).toEqual([]);
-    expect(treino.restaurarTipo(tipo.id).ativo).toBe(true);
+    await treino.excluirTipo(tipo.id);
+    expect(await treino.tiposAtivos()).toEqual([]);
+    expect((await treino.restaurarTipo(tipo.id)).ativo).toBe(true);
   });
 
   test('extração que não valida vira erro com o que fazer', async () => {

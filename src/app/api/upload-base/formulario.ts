@@ -1,9 +1,10 @@
 import { ErroDeUso } from '@/lib/api';
 import { lerModoReferencia, type ModoReferencia } from '@/lib/upload-base/datas';
+import { lerFormulario as formularioDaRequisicao } from '@/lib/envio';
 
 /** Campos comuns do formulário (multipart) do Upload Base. */
 export async function lerFormulario(request: Request) {
-  const form = await request.formData();
+  const form = await formularioDaRequisicao(request);
   const arquivo = form.get('arquivo');
   if (!(arquivo instanceof File)) throw new ErroDeUso('Escolha o arquivo da base (.xlsx ou .csv).');
   const campo = (n: string) => {

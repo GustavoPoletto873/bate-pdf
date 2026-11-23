@@ -1,4 +1,4 @@
-import type { DatabaseSync } from 'node:sqlite';
+import type { Banco } from '../db';
 import { ANEXO } from './anexo';
 import { CADASTROS } from './cadastros';
 import { LEITURAS } from './leituras';
@@ -6,6 +6,7 @@ import { MONITORAMENTO } from './monitoramento';
 import { NOTAS } from './notas';
 import { RELATORIOS } from './relatorios';
 import { TREINO } from './treino';
+import { ACESSO } from './acesso';
 import { NUCLEO } from './nucleo';
 import type { Esquema } from './tipos';
 
@@ -16,15 +17,15 @@ export type { ColunaNova, Esquema } from './tipos';
  * do menu do Bate Lastro) cuida do seu arquivo aqui; para acrescentar uma coluna numa tabela que
  * já existe em bancos antigos, use `colunas` (ALTER TABLE só quando falta).
  */
-export const ESQUEMAS: Esquema[] = [NUCLEO, CADASTROS, ANEXO, LEITURAS, MONITORAMENTO, NOTAS, RELATORIOS, TREINO];
+export const ESQUEMAS: Esquema[] = [NUCLEO, CADASTROS, ANEXO, LEITURAS, MONITORAMENTO, NOTAS, RELATORIOS, TREINO, ACESSO];
 
-export function aplicarEsquemas(conexao: DatabaseSync, esquemas: Esquema[] = ESQUEMAS): void {
-  for (const e of esquemas) conexao.exec(e.sql);
+export async function aplicarEsquemas(conexao: Banco, esquemas: Esquema[] = ESQUEMAS): Promise<void> {
+  for (const e of esquemas) await conexao.exec(e.sql);
   for (const e of esquemas) {
     for (const c of e.colunas ?? []) {
-      const existentes = conexao.prepare(`PRAGMA table_info(${c.tabela})`).all() as { name: string }[];
-      if (!existentes.some((x) => x.name === c.coluna)) conexao.exec(`ALTER TABLE ${c.tabela} ADD COLUMN ${c.coluna} ${c.definicao}`);
+      const existentes = await conexao.prepare(`PRAGMA table_info(${c.tabela})`).all<{ name: string }>();
+      if (!existentes.some((x) => x.name === c.coluna)) await conexao.exec(`ALTER TABLE ${c.tabela} ADD COLUMN ${c.coluna} ${c.definicao}`);
     }
   }
-  for (const e of esquemas) for (const sql of e.indices ?? []) conexao.exec(sql);
+  for (const e of esquemas) for (const sql of e.indices ?? []) await conexao.exec(sql);
 }

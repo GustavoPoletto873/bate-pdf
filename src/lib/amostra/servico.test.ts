@@ -27,11 +27,11 @@ function estoque(n: number, ref = '30/09/2026', extra = ''): Uint8Array {
 beforeAll(async () => {
   dbMod = await import('@/lib/db');
   servico = await import('./servico');
-  const c = dbMod.db();
+  const c = await dbMod.db();
   const ts = new Date().toISOString();
-  c.prepare("INSERT INTO administradoras (nome, criado_em) VALUES ('PLANNER CORRETORA', ?)").run(ts);
-  fundoId = Number(c.prepare("INSERT INTO fundos (nome, cnpj, criado_em, atualizado_em) VALUES ('FIDC TESTE', '12345678000195', ?, ?)").run(ts, ts).lastInsertRowid);
-  fundoPlanner = Number(c.prepare("INSERT INTO fundos (nome, cnpj, administradora_id, criado_em, atualizado_em) VALUES ('FIDC PLANNER', '98765432000110', 1, ?, ?)").run(ts, ts).lastInsertRowid);
+  await c.prepare("INSERT INTO administradoras (nome, criado_em) VALUES ('PLANNER CORRETORA', ?)").run(ts);
+  fundoId = Number((await c.prepare("INSERT INTO fundos (nome, cnpj, criado_em, atualizado_em) VALUES ('FIDC TESTE', '12345678000195', ?, ?)").run(ts, ts)).lastInsertRowid);
+  fundoPlanner = Number((await c.prepare("INSERT INTO fundos (nome, cnpj, administradora_id, criado_em, atualizado_em) VALUES ('FIDC PLANNER', '98765432000110', 1, ?, ?)").run(ts, ts)).lastInsertRowid);
 });
 
 const pedido = (extra: Partial<Parameters<typeof servico.gerar>[0]> = {}) => ({
@@ -62,19 +62,19 @@ describe('geração, histórico e arquivos', () => {
     expect(Object.keys(zip.files).sort()).toEqual(['amostra.xlsx', 'estoques/', 'estoques/Estoque_12345678000195.csv'].filter((n) => zip.files[n]).sort());
 
     expect(await servico.verificar(a.id)).toEqual({ identica: true, divergencias: [] });
-    expect(servico.listar(fundoId)[0].id).toBe(a.id);
-    expect(servico.buscarPorSeed('aaaa-bbbb-cccc').id).toBe(a.id);
+    expect((await servico.listar(fundoId))[0].id).toBe(a.id);
+    expect((await servico.buscarPorSeed('aaaa-bbbb-cccc')).id).toBe(a.id);
   });
 
   it('mesmo estoque em período sobreposto: 409 sem motivo; com motivo descarta a anterior', async () => {
     await expect(servico.gerar(pedido({ dataAte: '2026-09-29' }))).rejects.toMatchObject({ status: 409 });
     const nova = await servico.gerar(pedido({ dataAte: '2026-09-29', motivo: 'estoque incompleto' }));
-    const historico = servico.listar(fundoId);
+    const historico = await servico.listar(fundoId);
     expect(historico[0].id).toBe(nova.id);
     expect(historico[1]).toMatchObject({ status: 'DESCARTADA', motivo_descarte: 'Substituída por nova amostra: estoque incompleto' });
-    expect(() => servico.descartar(nova.id, '  ')).toThrow(/motivo/);
-    expect(servico.descartar(nova.id, 'teste').status).toBe('DESCARTADA');
-    expect(() => servico.descartar(nova.id, 'de novo')).toThrow(/já foi descartada/);
+    await expect(servico.descartar(nova.id, '  ')).rejects.toThrow(/motivo/);
+    expect((await servico.descartar(nova.id, 'teste')).status).toBe('DESCARTADA');
+    await expect(servico.descartar(nova.id, 'de novo')).rejects.toThrow(/já foi descartada/);
   });
 
   it('amostra anterior do histórico tira os títulos dos Maiores Cedentes', async () => {
@@ -112,18 +112,18 @@ describe('geração, histórico e arquivos', () => {
 
 describe('regra Planner', () => {
   it('soma as pendências em aberto das bases anteriores do fundo', async () => {
-    const c = dbMod.db();
+    const c = await dbMod.db();
     const ts = '2026-05-01T10:00:00.000Z';
-    c.prepare("INSERT INTO bases (id, nome, origem, criado_em, atualizado_em, fundo_id, data_referencia) VALUES ('b-q2', 'Q2', 'amostra', ?, ?, ?, '2026-06-30')").run(ts, ts, fundoPlanner);
-    const tit = (nu: string, ced: string) => Number(c.prepare(`INSERT INTO titulos (base_id, numero_documento, cedente_documento, cedente_nome, valor_total, data_vencimento)
-      VALUES ('b-q2', ?, ?, 'CED', '100.00', '2026-06-10')`).run(nu, ced).lastInsertRowid);
-    const t1 = tit('P1', '55555555000155');
-    const t2 = tit('P2', '55555555000155');
+    await c.prepare("INSERT INTO bases (id, nome, origem, criado_em, atualizado_em, fundo_id, data_referencia) VALUES ('b-q2', 'Q2', 'amostra', ?, ?, ?, '2026-06-30')").run(ts, ts, fundoPlanner);
+    const tit = async (nu: string, ced: string) => Number((await c.prepare(`INSERT INTO titulos (base_id, numero_documento, cedente_documento, cedente_nome, valor_total, data_vencimento)
+      VALUES ('b-q2', ?, ?, 'CED', '100.00', '2026-06-10')`).run(nu, ced)).lastInsertRowid);
+    const t1 = await tit('P1', '55555555000155');
+    const t2 = await tit('P2', '55555555000155');
     const pend = (t: number, lado: string, situacao: string) => c.prepare("INSERT INTO pendencias (base_id, titulo_id, lado, situacao) VALUES ('b-q2', ?, ?, ?)").run(t, lado, situacao);
-    pend(t1, 'lastro', 'pendente');
-    pend(t1, 'termo', 'vinculado');
-    pend(t2, 'lastro', 'vinculado');
-    pend(t2, 'termo', 'vinculado');
+    await pend(t1, 'lastro', 'pendente');
+    await pend(t1, 'termo', 'vinculado');
+    await pend(t2, 'lastro', 'vinculado');
+    await pend(t2, 'termo', 'vinculado');
     const a = await servico.gerar({
       fundoId: fundoPlanner, dataDe: '2026-07-01', dataAte: '2026-09-30', limiteAdquiridos: 120, limiteVencidos: 120, regra: 'planner',
       estoques: [{ nome: 'Estoque_planner.csv', conteudo: estoque(300, '30/09/2026', 'PL') }],

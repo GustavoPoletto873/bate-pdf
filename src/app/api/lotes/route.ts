@@ -6,9 +6,9 @@ export const dynamic = 'force-dynamic';
 
 /** Acompanhamento de Lotes: jobs pendentes/processando por base e os documentos com erro. ?pagina&por_pagina */
 export async function GET(request: Request) {
-  return responder(() => {
-    iniciarFila();
+  return responder(async () => {
+    await iniciarFila();
     const p = new URL(request.url).searchParams;
-    return Response.json(acompanhamentoLotes({ pagina: Number(p.get('pagina')) || 1, porPagina: Number(p.get('por_pagina')) || 10 }));
+    return Response.json(await acompanhamentoLotes({ pagina: Number(p.get('pagina')) || 1, porPagina: Number(p.get('por_pagina')) || 10 }));
   });
 }

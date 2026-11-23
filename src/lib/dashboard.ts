@@ -1,5 +1,5 @@
-import { db } from '@/lib/db';
-import { resumoDaAuditoria, type StatusAuditoria } from '@/lib/auditoria';
+import { db, emBlocos } from '@/lib/db';
+import { resumosDaAuditoria, type StatusAuditoria } from '@/lib/auditoria';
 import { digitos } from '@/lib/texto';
 
 /**
@@ -73,8 +73,8 @@ export type Administradora = { id: number; nome: string };
 
 const pct = (parte: number, total: number) => (total ? Math.round((parte / total) * 1000) / 10 : 0);
 
-export function administradoras(): Administradora[] {
-  return db().prepare('SELECT id, nome FROM administradoras ORDER BY nome COLLATE NOCASE').all() as Administradora[];
+export async function administradoras(): Promise<Administradora[]> {
+  return (await db()).prepare('SELECT id, nome FROM administradoras ORDER BY nome COLLATE NOCASE').all<Administradora>();
 }
 
 type LinhaBase = {
@@ -87,10 +87,10 @@ export function inicioDeHoje(agora = new Date()): string {
   return new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).toISOString();
 }
 
-export function painel(filtro: FiltroPainel = {}, agora = new Date()): Painel {
-  const c = db();
-  const fundosPorCnpj = new Map((c.prepare(`SELECT f.id, f.nome, f.cnpj, f.administradora_id, a.nome AS adm FROM fundos f
-      LEFT JOIN administradoras a ON a.id = f.administradora_id`).all() as { id: number; nome: string; cnpj: string; administradora_id: number | null; adm: string | null }[])
+export async function painel(filtro: FiltroPainel = {}, agora = new Date()): Promise<Painel> {
+  const c = await db();
+  const fundosPorCnpj = new Map(((await c.prepare(`SELECT f.id, f.nome, f.cnpj, f.administradora_id, a.nome AS adm FROM fundos f
+      LEFT JOIN administradoras a ON a.id = f.administradora_id`).all()) as { id: number; nome: string; cnpj: string; administradora_id: number | null; adm: string | null }[])
     .map((f) => [f.cnpj, f]));
   const de = filtro.de || null;
   const ate = filtro.ate || null;
@@ -98,11 +98,11 @@ export function painel(filtro: FiltroPainel = {}, agora = new Date()): Painel {
   const params: string[] = [];
   if (de) { condicoes.push('b.data_referencia >= ?'); params.push(de); }
   if (ate) { condicoes.push('substr(b.data_referencia, 1, 10) <= ?'); params.push(ate); }
-  const linhas = c.prepare(`
+  const linhas = await c.prepare(`
     SELECT b.id, b.nome, b.nome_fundo, b.cnpj_fundo, b.data_referencia, b.criado_em, b.fundo_id,
            f.nome AS f_nome, f.cnpj AS f_cnpj, f.administradora_id AS f_adm_id, a.nome AS f_adm
       FROM bases b LEFT JOIN fundos f ON f.id = b.fundo_id LEFT JOIN administradoras a ON a.id = f.administradora_id
-     ${condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : ''}`).all(...params) as LinhaBase[];
+     ${condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : ''}`).all<LinhaBase>(...params);
 
   // Fundo da base: o cadastrado; sem ele, o do cadastro com o mesmo CNPJ (como o filtro do Bate Lastro).
   const comFundo = linhas.map((b) => {
@@ -120,23 +120,24 @@ export function painel(filtro: FiltroPainel = {}, agora = new Date()): Painel {
   const porLado = new Map<string, { termo: number; lastro: number }>();
   const hoje = inicioDeHoje(agora);
   let batesHoje = 0;
-  if (ids.length) {
-    const marcas = ids.map(() => '?').join(',');
-    for (const r of c.prepare(`SELECT base_id, lado, COUNT(*) n FROM pendencias WHERE situacao = 'pendente' AND base_id IN (${marcas}) GROUP BY base_id, lado`)
-      .all(...ids) as { base_id: string; lado: 'termo' | 'lastro'; n: number }[]) {
+  for (const bloco of emBlocos(ids)) {
+    const marcas = bloco.map(() => '?').join(',');
+    for (const r of await c.prepare(`SELECT base_id, lado, COUNT(*) n FROM pendencias WHERE situacao = 'pendente' AND base_id IN (${marcas}) GROUP BY base_id, lado`)
+      .all<{ base_id: string; lado: 'termo' | 'lastro'; n: number }>(...bloco)) {
       const atual = porLado.get(r.base_id) ?? { termo: 0, lastro: 0 };
       atual[r.lado] = r.n;
       porLado.set(r.base_id, atual);
     }
-    batesHoje = (c.prepare(`SELECT COUNT(*) n FROM vinculos v JOIN pendencias p ON p.id = v.pendencia_id
-        WHERE p.base_id IN (${marcas}) AND v.criado_em >= ?`).get(...ids, hoje) as { n: number }).n;
+    batesHoje += (await c.prepare(`SELECT COUNT(*) n FROM vinculos v JOIN pendencias p ON p.id = v.pendencia_id
+        WHERE p.base_id IN (${marcas}) AND v.criado_em >= ?`).get<{ n: number }>(...bloco, hoje))!.n;
   }
 
   const limiteAtraso = new Date(agora.getTime() - DIAS_LIMITE_ATRASO * 86_400_000).toISOString();
   let aIniciar = 0, emAndamento = 0, atrasadas = 0, finalizadas = 0, totalBates = 0, pendTermo = 0, pendLastro = 0;
   const fundos = new Map<string, FundoPainel & { _ref: string }>();
+  const resumos = await resumosDaAuditoria(ids);
   for (const b of comFundo) {
-    const r = resumoDaAuditoria(b.id);
+    const r = resumos.get(b.id);
     if (!r) continue;
     const lados = porLado.get(b.id) ?? { termo: 0, lastro: 0 };
     if (r.status === 'a_iniciar') aIniciar++;

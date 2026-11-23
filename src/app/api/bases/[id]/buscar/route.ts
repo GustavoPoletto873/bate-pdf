@@ -5,6 +5,6 @@ export async function GET(request: Request, ctx: RouteContext<'/api/bases/[id]/b
   return responder(async () => {
     const { id } = await ctx.params;
     const q = new URL(request.url).searchParams.get('q') ?? '';
-    return Response.json(buscarNosPdfs(id, q));
+    return Response.json(await buscarNosPdfs(id, q));
   });
 }

@@ -1,4 +1,4 @@
-import type { DatabaseSync } from 'node:sqlite';
+import type { Banco, Valor } from '@/lib/db';
 import { camposDoLado, type CampoId, type Lado } from '@/lib/campos';
 import type { LeituraCampos } from '@/lib/bates/comparacao';
 
@@ -56,24 +56,34 @@ export function camposDaLeitura(l: Partial<LeituraLinha>, lado?: Lado): LeituraC
   return r;
 }
 
-/**
- * Grava uma leitura feita aqui (origem 'bater_pdf' ou 'planilha') a partir dos campos conferidos.
- * Chamar dentro de uma transação. Devolve o id.
- */
-export function inserirLeitura(conexao: DatabaseSync, dados: {
+export type DadosLeitura = {
   base_id: string;
   pdf_id: number | null;
   tipo_recebivel: string;
   origem: string;
   campos: LeituraCampos;
   lida_em: string;
-}): number {
+};
+
+/**
+ * O INSERT de uma leitura feita aqui (origem 'bater_pdf' ou 'planilha'), a partir dos campos
+ * conferidos. Com `id`, grava com esse id (para montar vários registros relacionados num lote).
+ */
+export function comandoDaLeitura(dados: DadosLeitura, id?: number): { sql: string; args: Valor[] } {
   const colunas = (Object.keys(COLUNA_DA_LEITURA) as CampoId[]).filter((c) => dados.campos[c] !== undefined);
   const nomes = colunas.map((c) => COLUNA_DA_LEITURA[c]);
-  const r = conexao.prepare(`INSERT INTO leituras (base_id, pdf_id, tipo_recebivel, origem, lida_em${nomes.map((n) => `, ${n}`).join('')})
-    VALUES (?, ?, ?, ?, ?${', ?'.repeat(nomes.length)})`)
-    .run(dados.base_id, dados.pdf_id, dados.tipo_recebivel, dados.origem, dados.lida_em, ...colunas.map((c) => vazioParaNull(dados.campos[c])));
-  return Number(r.lastInsertRowid);
+  const comId = id !== undefined;
+  return {
+    sql: `INSERT INTO leituras (${comId ? 'id, ' : ''}base_id, pdf_id, tipo_recebivel, origem, lida_em${nomes.map((n) => `, ${n}`).join('')})
+      VALUES (${comId ? '?, ' : ''}?, ?, ?, ?, ?${', ?'.repeat(nomes.length)})`,
+    args: [...(comId ? [id] : []), dados.base_id, dados.pdf_id, dados.tipo_recebivel, dados.origem, dados.lida_em, ...colunas.map((c) => vazioParaNull(dados.campos[c]))],
+  };
+}
+
+/** Grava uma leitura e devolve o id (chamar dentro de uma transação). */
+export async function inserirLeitura(conexao: Banco, dados: DadosLeitura): Promise<number> {
+  const { sql, args } = comandoDaLeitura(dados);
+  return (await conexao.prepare(sql).run(...args)).lastInsertRowid;
 }
 
 /** TIPO_RECEBIVEL de uma leitura criada aqui (Bater PDF, planilha): Termo = 'termo_cessao'. */

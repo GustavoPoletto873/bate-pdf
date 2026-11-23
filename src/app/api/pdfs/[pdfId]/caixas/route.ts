@@ -1,6 +1,5 @@
-import { join } from 'node:path';
 import { ErroDeUso, responder } from '@/lib/api';
-import { pastaDePdfs } from '@/lib/db';
+import { chaveDoPdf } from '@/lib/arquivos';
 import { obterPdf } from '@/lib/repo';
 import { caixasDasFaixas } from '@/lib/pdf/pdfium';
 
@@ -12,7 +11,7 @@ import { caixasDasFaixas } from '@/lib/pdf/pdfium';
 export async function GET(request: Request, ctx: RouteContext<'/api/pdfs/[pdfId]/caixas'>) {
   return responder(async () => {
     const { pdfId } = await ctx.params;
-    const pdf = obterPdf(Number(pdfId));
+    const pdf = await obterPdf(Number(pdfId));
     if (!pdf) throw new ErroDeUso('PDF não encontrado.', 404);
     const params = new URL(request.url).searchParams;
     const pagina = Number(params.get('pagina'));
@@ -27,7 +26,7 @@ export async function GET(request: Request, ctx: RouteContext<'/api/pdfs/[pdfId]
     if (regiao) pedidos.push({ tipo: 'regiao', faixa: [Number(regiao[1]), Number(regiao[2])] });
     if (pedidos.length > 200) throw new ErroDeUso('Trechos demais num pedido só.');
 
-    const r = await caixasDasFaixas(join(pastaDePdfs(pdf.base_id), `${pdf.sha256}.pdf`), pagina, pedidos.map((p) => p.faixa));
+    const r = await caixasDasFaixas(chaveDoPdf(pdf.base_id, pdf.sha256), pagina, pedidos.map((p) => p.faixa));
     return Response.json({
       largura: r.largura,
       altura: r.altura,

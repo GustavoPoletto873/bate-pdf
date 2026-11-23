@@ -1,6 +1,7 @@
 import { responder } from '@/lib/api';
 import { inspecionar } from '@/lib/amostra/servico';
 import { arquivosDo, textoDo } from '@/lib/amostra/formulario';
+import { lerFormulario } from '@/lib/envio';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,7 +11,7 @@ export const dynamic = 'force-dynamic';
  */
 export async function POST(request: Request) {
   return responder(async () => {
-    const form = await request.formData();
+    const form = await lerFormulario(request);
     const arquivos = await arquivosDo(form, 'arquivos');
     return Response.json({ arquivos: await inspecionar(arquivos, textoDo(form, 'data_base') === '1') });
   });

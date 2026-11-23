@@ -17,6 +17,6 @@ export async function POST(request: Request) {
   return responder(async () => {
     const { base_id } = await lerJson<{ base_id?: string }>(request);
     if (!base_id) throw new ErroDeUso('Escolha a base.');
-    return Response.json({ progresso: iniciarConsulta(base_id) }, { status: 202 });
+    return Response.json({ progresso: await iniciarConsulta(base_id) }, { status: 202 });
   });
 }

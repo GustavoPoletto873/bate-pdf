@@ -68,12 +68,12 @@ describe('informe mensal', () => {
 
 describe('emissão CVM/NIX', () => {
   test('prepara o rascunho, emite os dois e preenche os modelos', async () => {
-    const c = dbMod.db();
-    const adm = c.prepare("INSERT INTO administradoras (nome, razao_social, endereco, criado_em) VALUES ('ADM EXEMPLO', 'ADM EXEMPLO DTVM S.A.', 'Rua Fictícia, 100', ?)").run(new Date().toISOString());
-    const f = c.prepare("INSERT INTO fundos (nome, cnpj, tipo, administradora_id, criado_em, atualizado_em) VALUES ('FIDC EXEMPLO', ?, 'FIDC', ?, ?, ?)")
+    const c = await dbMod.db();
+    const adm = await c.prepare("INSERT INTO administradoras (nome, razao_social, endereco, criado_em) VALUES ('ADM EXEMPLO', 'ADM EXEMPLO DTVM S.A.', 'Rua Fictícia, 100', ?)").run(new Date().toISOString());
+    const f = await c.prepare("INSERT INTO fundos (nome, cnpj, tipo, administradora_id, criado_em, atualizado_em) VALUES ('FIDC EXEMPLO', ?, 'FIDC', ?, ?, ?)")
       .run(CNPJ, Number(adm.lastInsertRowid), new Date().toISOString(), new Date().toISOString());
     const fundoId = Number(f.lastInsertRowid);
-    const baseId = repo.criarBase({
+    const baseId = await repo.criarBase({
       nome: 'FIDC EXEMPLO — 3º Trim/2026', nome_fundo: 'FIDC EXEMPLO', cnpj_fundo: CNPJ, data_referencia: '2026-09-30', administradora: null,
       origem: 'amostra', arquivo_origem: 'amostra.xlsx', fundo_id: fundoId,
       titulos: ['1', '2'].map((n, i) => ({
@@ -86,7 +86,7 @@ describe('emissão CVM/NIX', () => {
     const zip = await zipCvm('202609');
     const baixar = async () => new Response(new Uint8Array(zip));
 
-    const lista = rel.fundosParaEmissao('2026-09-30');
+    const lista = await rel.fundosParaEmissao('2026-09-30');
     expect(lista[0]).toMatchObject({ nome: 'FIDC EXEMPLO', tem_carteira: false, tem_base: true, cenario: null });
 
     const r = await rel.prepararRascunho(fundoId, '2026-09-30', { baixar });
@@ -100,7 +100,7 @@ describe('emissão CVM/NIX', () => {
     expect(r.snapshot.roteiro_cvm).toBe('romano');
     expect(r.secoes.some((s) => s.chave === 'iv_a')).toBe(true);
 
-    const salvo = rel.salvarEscolhas(r.id, { iv_a: 'com_ocorrencia' }, { ii: 'Texto próprio da equipe.' });
+    const salvo = await rel.salvarEscolhas(r.id, { iv_a: 'com_ocorrencia' }, { ii: 'Texto próprio da equipe.' });
     expect(salvo.textos.ii).toBe('Texto próprio da equipe.');
     expect(salvo.textos.iv_a).toMatch(/foram promovidos ajustes/);
 
@@ -108,7 +108,7 @@ describe('emissão CVM/NIX', () => {
     expect(emitidos.map((e) => e.nome_arquivo)).toEqual(['CVM_FIDC EXEMPLO_12345678000195.docx', 'NIX_FIDC EXEMPLO_12345678000195.docx']);
 
     for (const e of emitidos) {
-      const docx = await JSZip.loadAsync(rel.arquivoDaEmissao(e.id).conteudo);
+      const docx = await JSZip.loadAsync((await rel.arquivoDaEmissao(e.id)).conteudo);
       const xml = await docx.file('word/document.xml')!.async('string');
       const texto = xml.replace(/<[^>]+>/g, '');
       expect(texto).not.toContain('{{');
@@ -135,8 +135,8 @@ describe('emissão CVM/NIX', () => {
   });
 
   test('sem carteira na CVM, a emissão é recusada com o que fazer', async () => {
-    const c = dbMod.db();
-    const f = c.prepare("INSERT INTO fundos (nome, cnpj, tipo, criado_em, atualizado_em) VALUES ('FIC EXEMPLO', '98765432000110', 'FIC_FIDC', ?, ?)").run(new Date().toISOString(), new Date().toISOString());
+    const c = await dbMod.db();
+    const f = await c.prepare("INSERT INTO fundos (nome, cnpj, tipo, criado_em, atualizado_em) VALUES ('FIC EXEMPLO', '98765432000110', 'FIC_FIDC', ?, ?)").run(new Date().toISOString(), new Date().toISOString());
     const zip = await zipCvm('202609');
     const r = await rel.prepararRascunho(Number(f.lastInsertRowid), '2026-09-30', { baixar: async () => new Response(new Uint8Array(zip)) });
     expect(r.cenario).toBe('SEM_DC');

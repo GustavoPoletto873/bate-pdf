@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import { after } from 'next/server';
 import { db } from '@/lib/db';
 import { ErroDeUso } from '@/lib/api';
 
@@ -47,8 +48,8 @@ export function chaveConsultavel(chave: string | null | undefined): chave is str
   return c.length >= 44 && !c.startsWith('000');
 }
 
-export function registrarNota(n: { chave_nfe: string; base_id: string; status_nfe: StatusNfe; origem: OrigemNfe; xml_content?: string | null; mensagem?: string | null }, agora = new Date()): void {
-  db().prepare(`INSERT INTO notas_fiscais (chave_nfe, base_id, status_nfe, origem, mensagem, xml_content, consulta_data)
+export async function registrarNota(n: { chave_nfe: string; base_id: string; status_nfe: StatusNfe; origem: OrigemNfe; xml_content?: string | null; mensagem?: string | null }, agora = new Date()): Promise<void> {
+  await (await db()).prepare(`INSERT INTO notas_fiscais (chave_nfe, base_id, status_nfe, origem, mensagem, xml_content, consulta_data)
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (chave_nfe, base_id) DO UPDATE SET status_nfe = excluded.status_nfe, origem = excluded.origem,
         mensagem = excluded.mensagem, xml_content = COALESCE(excluded.xml_content, notas_fiscais.xml_content),
@@ -70,19 +71,19 @@ function condicoes(f: FiltroNotas): { where: string; params: string[] } {
   return { where: partes.length ? `WHERE ${partes.join(' AND ')}` : '', params };
 }
 
-export function listarNotas(f: FiltroNotas & { pagina?: number; tamanho?: number } = {}) {
-  const c = db();
+export async function listarNotas(f: FiltroNotas & { pagina?: number; tamanho?: number } = {}) {
+  const c = await db();
   const tamanho = Math.min(100, Math.max(1, f.tamanho ?? 20));
   const { where, params } = condicoes(f);
-  const resumo = c.prepare(`SELECT COUNT(*) total,
+  const resumo = (await c.prepare(`SELECT COUNT(*) total,
       COALESCE(SUM(n.status_nfe = 'Ativa'), 0) ativas, COALESCE(SUM(n.status_nfe = 'Cancelada'), 0) canceladas, COALESCE(SUM(n.status_nfe = 'Erro'), 0) erros
-    FROM notas_fiscais n LEFT JOIN bases b ON b.id = n.base_id ${where}`).get(...params) as { total: number; ativas: number; canceladas: number; erros: number };
+    FROM notas_fiscais n LEFT JOIN bases b ON b.id = n.base_id ${where}`).get<{ total: number; ativas: number; canceladas: number; erros: number }>(...params))!;
   const paginas = Math.max(1, Math.ceil(resumo.total / tamanho));
   const pagina = Math.min(paginas, Math.max(1, f.pagina ?? 1));
-  const dados = (c.prepare(`SELECT n.id, n.chave_nfe, n.base_id, b.nome AS base_nome, n.status_nfe, n.origem, n.mensagem, n.consulta_data,
+  const dados = ((await c.prepare(`SELECT n.id, n.chave_nfe, n.base_id, b.nome AS base_nome, n.status_nfe, n.origem, n.mensagem, n.consulta_data,
       (n.xml_content IS NOT NULL) AS tem_xml
     FROM notas_fiscais n LEFT JOIN bases b ON b.id = n.base_id ${where}
-    ORDER BY n.consulta_data DESC, n.id DESC LIMIT ? OFFSET ?`).all(...params, tamanho, (pagina - 1) * tamanho) as (Omit<NotaFiscal, 'tem_xml'> & { tem_xml: number })[])
+    ORDER BY n.consulta_data DESC, n.id DESC LIMIT ? OFFSET ?`).all(...params, tamanho, (pagina - 1) * tamanho)) as (Omit<NotaFiscal, 'tem_xml'> & { tem_xml: number })[])
     .map((n) => ({ ...n, tem_xml: Boolean(n.tem_xml) }));
   return {
     dados,
@@ -91,8 +92,8 @@ export function listarNotas(f: FiltroNotas & { pagina?: number; tamanho?: number
   };
 }
 
-export function xmlDaNota(id: number): { chave_nfe: string; xml: string } {
-  const r = db().prepare('SELECT chave_nfe, xml_content FROM notas_fiscais WHERE id = ?').get(id) as { chave_nfe: string; xml_content: string | null } | undefined;
+export async function xmlDaNota(id: number): Promise<{ chave_nfe: string; xml: string }> {
+  const r = await (await db()).prepare('SELECT chave_nfe, xml_content FROM notas_fiscais WHERE id = ?').get<{ chave_nfe: string; xml_content: string | null }>(id);
   if (!r?.xml_content) throw new ErroDeUso('XML não encontrado para esta nota fiscal.', 404);
   return { chave_nfe: r.chave_nfe, xml: r.xml_content };
 }
@@ -101,8 +102,8 @@ const ROTULO_ORIGEM: Record<OrigemNfe, string> = { xml_anexo: 'XML do Anexo', se
 
 export async function exportarNotas(f: FiltroNotas): Promise<Buffer> {
   const { where, params } = condicoes(f);
-  const linhas = db().prepare(`SELECT n.chave_nfe, n.consulta_data, n.status_nfe, n.origem, n.base_id, b.nome AS base_nome, n.mensagem
-    FROM notas_fiscais n LEFT JOIN bases b ON b.id = n.base_id ${where} ORDER BY n.consulta_data DESC`).all(...params) as
+  const linhas = (await (await db()).prepare(`SELECT n.chave_nfe, n.consulta_data, n.status_nfe, n.origem, n.base_id, b.nome AS base_nome, n.mensagem
+    FROM notas_fiscais n LEFT JOIN bases b ON b.id = n.base_id ${where} ORDER BY n.consulta_data DESC`).all(...params)) as
     { chave_nfe: string; consulta_data: string; status_nfe: string; origem: OrigemNfe; base_id: string; base_nome: string | null; mensagem: string | null }[];
   if (!linhas.length) throw new ErroDeUso('Nenhuma nota fiscal para exportar com esse filtro.', 404);
   const livro = new ExcelJS.Workbook();
@@ -136,8 +137,8 @@ export function credenciaisSerpro(): { chave: string; segredo: string } | null {
   return chave && segredo ? { chave, segredo } : null;
 }
 
-export function chavesDaBase(baseId: string): string[] {
-  const linhas = db().prepare('SELECT DISTINCT chave_nfe FROM titulos WHERE base_id = ? AND chave_nfe IS NOT NULL').all(baseId) as { chave_nfe: string }[];
+export async function chavesDaBase(baseId: string): Promise<string[]> {
+  const linhas = await (await db()).prepare('SELECT DISTINCT chave_nfe FROM titulos WHERE base_id = ? AND chave_nfe IS NOT NULL').all<{ chave_nfe: string }>(baseId);
   return [...new Set(linhas.map((l) => l.chave_nfe.replace(/\D/g, '')).filter(chaveConsultavel))];
 }
 
@@ -176,15 +177,15 @@ async function tokenSerpro(buscar: Buscar): Promise<string> {
  * Consulta todas as chaves da base, uma por vez (como o Bate Lastro). Roda em segundo plano:
  * a tela acompanha por `progressoConsulta`.
  */
-export function iniciarConsulta(baseId: string, buscar: Buscar = fetch): Progresso {
+export async function iniciarConsulta(baseId: string, buscar: Buscar = fetch): Promise<Progresso> {
   const atual = progressos.get(baseId);
   if (atual && !atual.terminou) throw new ErroDeUso('A consulta desta base já está rodando.', 409);
   if (!credenciaisSerpro()) throw new ErroDeUso('Configure SERPRO_CONSUMER_KEY e SERPRO_SECRET_KEY no .env.local (os mesmos nomes do Bate Lastro) e reinicie o app.');
-  const chaves = chavesDaBase(baseId);
+  const chaves = await chavesDaBase(baseId);
   if (!chaves.length) throw new ErroDeUso('Esta base não tem chave de NF-e válida (CHAVE_NFE com 44 dígitos) para consultar.');
   const p: Progresso = { base_id: baseId, total: chaves.length, feitas: 0, ativas: 0, canceladas: 0, erros: 0, terminou: false, erro: null, iniciado_em: new Date().toISOString() };
   progressos.set(baseId, p);
-  void (async () => {
+  const tarefa = (async () => {
     try {
       const token = await tokenSerpro(buscar);
       for (const chave of chaves) {
@@ -194,16 +195,16 @@ export function iniciarConsulta(baseId: string, buscar: Buscar = fetch): Progres
           });
           const corpo = await r.text();
           if (!r.ok) {
-            registrarNota({ chave_nfe: chave, base_id: baseId, status_nfe: 'Erro', origem: 'serpro', mensagem: `HTTP ${r.status}: ${semSegredo(corpo)}` });
+            await registrarNota({ chave_nfe: chave, base_id: baseId, status_nfe: 'Erro', origem: 'serpro', mensagem: `HTTP ${r.status}: ${semSegredo(corpo)}` });
             p.erros++;
           } else {
             const status = statusDoXml(corpo);
-            registrarNota({ chave_nfe: chave, base_id: baseId, status_nfe: status, origem: 'serpro', xml_content: corpo });
+            await registrarNota({ chave_nfe: chave, base_id: baseId, status_nfe: status, origem: 'serpro', xml_content: corpo });
             if (status === 'Ativa') p.ativas++;
             else p.canceladas++;
           }
         } catch (e) {
-          registrarNota({ chave_nfe: chave, base_id: baseId, status_nfe: 'Erro', origem: 'serpro', mensagem: semSegredo(e instanceof Error ? e.message : String(e)) });
+          await registrarNota({ chave_nfe: chave, base_id: baseId, status_nfe: 'Erro', origem: 'serpro', mensagem: semSegredo(e instanceof Error ? e.message : String(e)) });
           p.erros++;
         }
         p.feitas++;
@@ -214,14 +215,16 @@ export function iniciarConsulta(baseId: string, buscar: Buscar = fetch): Progres
       p.terminou = true;
     }
   })();
+  // Na nuvem a função só vive enquanto a requisição dura: segura até a consulta terminar.
+  try { after(() => tarefa); } catch { /* fora de requisição (testes) */ }
   return p;
 }
 
 /** Bases com chave de NF-e, para o seletor da consulta. */
-export function basesComChaves(): { id: string; nome: string; chaves: number; consultadas: number }[] {
-  const linhas = db().prepare(`SELECT b.id, b.nome,
+export async function basesComChaves(): Promise<{ id: string; nome: string; chaves: number; consultadas: number }[]> {
+  const linhas = await (await db()).prepare(`SELECT b.id, b.nome,
       (SELECT COUNT(DISTINCT t.chave_nfe) FROM titulos t WHERE t.base_id = b.id AND length(t.chave_nfe) >= 44) AS chaves,
       (SELECT COUNT(*) FROM notas_fiscais n WHERE n.base_id = b.id) AS consultadas
-    FROM bases b ORDER BY b.criado_em DESC`).all() as { id: string; nome: string; chaves: number; consultadas: number }[];
+    FROM bases b ORDER BY b.criado_em DESC`).all<{ id: string; nome: string; chaves: number; consultadas: number }>();
   return linhas.filter((b) => b.chaves > 0 || b.consultadas > 0);
 }

@@ -1,4 +1,4 @@
-import { db, transacao } from '@/lib/db';
+import { db, inserirVarios, transacao, type Valor } from '@/lib/db';
 import type { Lado } from '@/lib/campos';
 import { cascata, type RegistroCascata } from '@/lib/bates/cascata';
 import { ladoDaLeitura } from '@/lib/bates/comparacao';
@@ -19,11 +19,11 @@ export type MotivoProcessar = 'sem_leituras' | 'leitura_nova' | 'sem_leitura_nov
  * has_new_leitura_since_last_process: pode processar se sobrou leitura sem vínculo e sem
  * pré-bate. Sem nenhuma leitura também pode (lá é a "primeira vez"): o clique explica o que falta.
  */
-export function podeProcessar(baseId: string): { pode_processar: boolean; motivo: MotivoProcessar } {
-  const c = db();
-  const total = (c.prepare('SELECT COUNT(*) n FROM leituras WHERE base_id = ?').get(baseId) as { n: number }).n;
+export async function podeProcessar(baseId: string): Promise<{ pode_processar: boolean; motivo: MotivoProcessar }> {
+  const c = await db();
+  const total = (await c.prepare('SELECT COUNT(*) n FROM leituras WHERE base_id = ?').get<{ n: number }>(baseId))!.n;
   if (!total) return { pode_processar: true, motivo: 'sem_leituras' };
-  const livre = c.prepare(`SELECT 1 FROM leituras l WHERE l.base_id = ?
+  const livre = await c.prepare(`SELECT 1 FROM leituras l WHERE l.base_id = ?
       AND NOT EXISTS (SELECT 1 FROM vinculos v WHERE v.leitura_id = l.id)
       AND NOT EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.leitura_id = l.id) LIMIT 1`).get(baseId);
   return livre ? { pode_processar: true, motivo: 'leitura_nova' } : { pode_processar: false, motivo: 'sem_leitura_nova' };
@@ -45,9 +45,9 @@ export type ResultadoProcessamento = {
 };
 
 /** Motivos de documentos do Anexo que falharam na leitura (coleta_erros_leitura). */
-function motivosDeFalha(baseId: string): string[] | null {
+async function motivosDeFalha(baseId: string): Promise<string[] | null> {
   try {
-    const linhas = db().prepare(`SELECT d.motivo FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id
+    const linhas = await (await db()).prepare(`SELECT d.motivo FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id
       WHERE l.base_id = ? AND d.status = 'erro'`).all(baseId) as { motivo: string | null }[];
     if (!linhas.length) return null;
     return [...new Set(linhas.map((l) => (l.motivo ?? '').trim()).filter(Boolean))].sort();
@@ -56,48 +56,48 @@ function motivosDeFalha(baseId: string): string[] | null {
   }
 }
 
-export function processarBase(baseId: string): ResultadoProcessamento {
+export async function processarBase(baseId: string): Promise<ResultadoProcessamento> {
   const inicio = Date.now();
-  const c = db();
   const contagem: Record<Lado, { bases: number; leituras: number; pares: number; sobra: number }> = {
     termo: { bases: 0, leituras: 0, pares: 0, sobra: 0 },
     lastro: { bases: 0, leituras: 0, pares: 0, sobra: 0 },
   };
 
-  transacao(() => {
+  await transacao(async (tx) => {
     // Leituras livres (sem vínculo e sem pré-bate), separadas pelo TIPO_RECEBIVEL.
-    const leituras = c.prepare(`SELECT l.id, l.tipo_recebivel, l.numero_documento, l.valor_nominal AS valor, l.data_vencimento,
+    const leituras = await tx.prepare(`SELECT l.id, l.tipo_recebivel, l.numero_documento, l.valor_nominal AS valor, l.data_vencimento,
         l.data_emissao, l.data_aquisicao, l.cedente_documento AS doc_cedente, l.sacado_documento AS doc_sacado
       FROM leituras l WHERE l.base_id = ?
         AND NOT EXISTS (SELECT 1 FROM vinculos v WHERE v.leitura_id = l.id)
         AND NOT EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.leitura_id = l.id)
       ORDER BY l.id`).all(baseId) as (RegistroCascata & { tipo_recebivel: string | null })[];
 
-    const bases = c.prepare(`SELECT t.id, p.id AS pendencia_id, t.numero_documento, t.valor_total AS valor, t.data_vencimento,
+    const bases = tx.prepare(`SELECT t.id, p.id AS pendencia_id, t.numero_documento, t.valor_total AS valor, t.data_vencimento,
         t.data_emissao, t.data_aquisicao, t.cedente_documento AS doc_cedente, t.sacado_documento AS doc_sacado
       FROM pendencias p JOIN titulos t ON t.id = p.titulo_id
       WHERE p.base_id = ? AND p.lado = ? AND p.situacao = 'pendente'
         AND NOT EXISTS (SELECT 1 FROM pre_matches pm WHERE pm.pendencia_id = p.id)
       ORDER BY t.id`);
-    const inserir = c.prepare(`INSERT INTO pre_matches (base_id, pendencia_id, leitura_id, similaridade, criterio, criado_em)
-      VALUES (?, ?, ?, ?, ?, ?)`);
+    const novos: Valor[][] = [];
     const ts = new Date().toISOString();
 
     for (const lado of ['termo', 'lastro'] as Lado[]) {
       const doLado = leituras.filter((l) => ladoDaLeitura(l.tipo_recebivel) === lado);
-      const registros = bases.all(baseId, lado) as (RegistroCascata & { pendencia_id: number })[];
+      const registros = await bases.all(baseId, lado) as (RegistroCascata & { pendencia_id: number })[];
       const pendenciaDoTitulo = new Map(registros.map((r) => [r.id, r.pendencia_id]));
       const r = cascata(registros, doLado);
-      for (const par of r.pares) inserir.run(baseId, pendenciaDoTitulo.get(par.base_id)!, par.leitura_id, par.similaridade, par.criterio, ts);
+      for (const par of r.pares) novos.push([baseId, pendenciaDoTitulo.get(par.base_id)!, par.leitura_id, par.similaridade, par.criterio, ts]);
       contagem[lado] = { bases: registros.length, leituras: doLado.length, pares: r.pares.length, sobra: r.basesSemPar.length };
     }
-    if (contagem.termo.pares + contagem.lastro.pares) c.prepare('UPDATE bases SET atualizado_em = ? WHERE id = ?').run(ts, baseId);
+    // Os pares numa ida só (no Turso, um INSERT por par seria uma ida à rede por par).
+    await inserirVarios(tx, 'pre_matches', ['base_id', 'pendencia_id', 'leitura_id', 'similaridade', 'criterio', 'criado_em'], novos);
+    if (novos.length) await tx.prepare('UPDATE bases SET atualizado_em = ? WHERE id = ?').run(ts, baseId);
   });
 
   let aviso: string | null = null;
   if (!contagem.termo.leituras && !contagem.lastro.leituras) {
-    const total = (c.prepare('SELECT COUNT(*) n FROM leituras WHERE base_id = ?').get(baseId) as { n: number }).n;
-    const falhas = motivosDeFalha(baseId);
+    const total = (await (await db()).prepare('SELECT COUNT(*) n FROM leituras WHERE base_id = ?').get<{ n: number }>(baseId))!.n;
+    const falhas = await motivosDeFalha(baseId);
     if (total) {
       aviso = 'Todos os documentos lidos desta base já estão pareados. Envie novos documentos no Anexo ou resolva as pendências pelo Bater PDF.';
     } else if (falhas) {

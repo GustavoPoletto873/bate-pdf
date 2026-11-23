@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 export async function GET(_req: Request, ctx: RouteContext<'/api/bases/[id]/orfas'>) {
   return responder(async () => {
     const { id } = await ctx.params;
-    if (!obterBase(id)) throw new ErroDeUso('Base não encontrada.', 404);
-    return Response.json(pendenciasEOrfas(id));
+    if (!await obterBase(id)) throw new ErroDeUso('Base não encontrada.', 404);
+    return Response.json(await pendenciasEOrfas(id));
   });
 }

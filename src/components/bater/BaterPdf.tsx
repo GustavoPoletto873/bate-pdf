@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Check, ChevronsLeft, ChevronsRight, Copy, Download, Eye, FileStack, Link2, Loader2, Maximize2, Minimize2, RefreshCw, Search, Square, SquareCheck, X, Zap } from 'lucide-react';
 import { api, ErroApi, type ResultadoPreClassificacaoTela, type SugestaoTitulo } from '@/lib/cliente';
 import type { BaseResumo, OperacaoMarcacao, PendenciaLinha, ResultadoBusca } from '@/lib/repo';
@@ -24,6 +24,25 @@ const LARGURA_PADRAO = 50;
 const CHAVE_LARGURA = 'lastro-bater-largura-busca';
 
 type Mensagem = { tipo: 'ok' | 'erro' | 'alerta' | 'info'; texto: string } | null;
+
+/**
+ * Texto de busca de cada título, normalizado uma vez só (o filtro roda a cada tecla em bases de
+ * milhares de linhas). Pela referência do título: marcar um campo não troca o título, então o
+ * índice sobrevive às marcações; recarregar a lista traz títulos novos e o índice é refeito.
+ */
+const INDICE_BUSCA = new WeakMap<object, { texto: string; digitos: string }>();
+function indiceDoTitulo(t: PendenciaLinha['titulo']) {
+  let i = INDICE_BUSCA.get(t);
+  if (!i) {
+    i = {
+      texto: normalizarTexto(`${t.numero_documento ?? ''} ${t.sacado_nome ?? ''} ${t.cedente_nome ?? ''}`),
+      // Separados por espaço: um CPF não "continua" no CNPJ do cedente.
+      digitos: `${(t.sacado_documento ?? '').replace(/\D/g, '')} ${(t.cedente_documento ?? '').replace(/\D/g, '')}`,
+    };
+    INDICE_BUSCA.set(t, i);
+  }
+  return i;
+}
 
 export function BaterPdf({ baseId }: { baseId: string }) {
   const [base, setBase] = useState<BaseResumo | null>(null);
@@ -120,9 +139,11 @@ export function BaterPdf({ baseId }: { baseId: string }) {
   }, [pre]);
   const nomesPdfs = useMemo(() => pre?.resultado.nomes_pdfs ?? {}, [pre]);
 
+  // A busca digitada é "adiada": a caixa de texto responde na hora e a lista filtra logo em seguida.
+  const textoBusca = useDeferredValue(filtro.texto);
   const filtradas = useMemo(() => {
-    const alvo = normalizarTexto(filtro.texto.trim());
-    const digitosAlvo = filtro.texto.replace(/\D/g, '');
+    const alvo = normalizarTexto(textoBusca.trim());
+    const digitosAlvo = textoBusca.replace(/\D/g, '');
     return (pendencias ?? []).filter((l) => {
       if (filtro.lado !== 'todos' && l.lado !== filtro.lado) return false;
       if (filtro.situacao === 'pendente' && l.situacao !== 'pendente') return false;
@@ -132,11 +153,10 @@ export function BaterPdf({ baseId }: { baseId: string }) {
         if ((filtro.sugestao === 'com') !== tem) return false;
       }
       if (!alvo) return true;
-      const t = l.titulo;
-      return normalizarTexto(`${t.numero_documento ?? ''} ${t.sacado_nome ?? ''} ${t.cedente_nome ?? ''}`).includes(alvo)
-        || (digitosAlvo.length >= 3 && `${t.sacado_documento ?? ''}${t.cedente_documento ?? ''}`.replace(/\D/g, '').includes(digitosAlvo));
+      const i = indiceDoTitulo(l.titulo);
+      return i.texto.includes(alvo) || (digitosAlvo.length >= 3 && i.digitos.includes(digitosAlvo));
     });
-  }, [pendencias, filtro, sugestoes]);
+  }, [pendencias, filtro.lado, filtro.situacao, filtro.sugestao, textoBusca, sugestoes]);
 
   const linhaAtiva = useMemo(() => pendencias?.find((l) => l.pendencia_id === ativa) ?? null, [pendencias, ativa]);
 

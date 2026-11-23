@@ -7,6 +7,6 @@ export const dynamic = 'force-dynamic';
 export async function GET(_request: Request, ctx: RouteContext<'/api/amostragem/seed/[seed]'>) {
   return responder(async () => {
     const { seed } = await ctx.params;
-    return Response.json(buscarPorSeed(decodeURIComponent(seed)));
+    return Response.json(await buscarPorSeed(decodeURIComponent(seed)));
   });
 }

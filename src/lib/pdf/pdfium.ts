@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { init, type WrappedPdfiumModule } from '@embedpdf/pdfium';
+import { lerArquivo } from '@/lib/arquivos';
 
 /**
  * PDFium (WebAssembly) no servidor, para as coordenadas de texto: onde, na
@@ -45,12 +46,17 @@ function estado(): Promise<Estado> {
   return g.__batePdfPdfium;
 }
 
+/** O PDFium deste processo (o mesmo das caixas), para a indexação na nuvem. */
+export async function pdfiumDoServidor(): Promise<WrappedPdfiumModule> {
+  return (await estado()).pdfium;
+}
+
 function heapU8(pdfium: WrappedPdfiumModule): Uint8Array {
   return (pdfium.pdfium as unknown as { HEAPU8: Uint8Array }).HEAPU8;
 }
 
-function abrir(e: Estado, caminho: string): number {
-  const aberto = e.docs.get(caminho);
+async function abrir(e: Estado, chave: string): Promise<number> {
+  const aberto = e.docs.get(chave);
   if (aberto) {
     aberto.ultimoUso = Date.now();
     return aberto.doc;
@@ -59,7 +65,11 @@ function abrir(e: Estado, caminho: string): number {
     const [maisAntigo] = [...e.docs.entries()].sort((a, b) => a[1].ultimoUso - b[1].ultimoUso)[0];
     fechar(e, maisAntigo);
   }
-  const bytes = readFileSync(caminho);
+  const bytes = await lerArquivo(chave);
+  if (!bytes) throw new Error('O arquivo do PDF não está mais no armazenamento.');
+  // Outra chamada pode ter aberto o mesmo PDF enquanto este lia.
+  const ja = e.docs.get(chave);
+  if (ja) return ja.doc;
   const ptr = e.pdfium.pdfium.wasmExports.malloc(bytes.length);
   heapU8(e.pdfium).set(bytes, ptr);
   const doc = e.pdfium.FPDF_LoadMemDocument(ptr, bytes.length, '');
@@ -67,7 +77,7 @@ function abrir(e: Estado, caminho: string): number {
     e.pdfium.pdfium.wasmExports.free(ptr);
     throw new Error('Não foi possível abrir o PDF.');
   }
-  e.docs.set(caminho, { ptr, doc, ultimoUso: Date.now() });
+  e.docs.set(chave, { ptr, doc, ultimoUso: Date.now() });
   return doc;
 }
 
@@ -98,12 +108,12 @@ function juntarPorLinha(caixas: Caixa[]): Caixa[] {
 
 /**
  * Caixas (normalizadas) de cada faixa [início, fim) de caracteres da página
- * (`pagina` começa em 1). Faixa sem caractere visível volta vazia.
+ * (`pagina` começa em 1). `chave` é a do armazenamento (chaveDoPdf). Faixa sem caractere visível volta vazia.
  */
-export async function caixasDasFaixas(caminho: string, pagina: number, faixas: [number, number][]):
+export async function caixasDasFaixas(chave: string, pagina: number, faixas: [number, number][]):
   Promise<{ largura: number; altura: number; caixas: Caixa[][] }> {
   const e = await estado();
-  const doc = abrir(e, caminho);
+  const doc = await abrir(e, chave);
   const p = e.pdfium;
   const page = p.FPDF_LoadPage(doc, pagina - 1);
   if (!page) throw new Error(`Página ${pagina} não existe no PDF.`);

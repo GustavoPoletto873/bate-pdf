@@ -1,16 +1,17 @@
 import { ErroDeUso, responder } from '@/lib/api';
 import { gerar, listar } from '@/lib/amostra/servico';
 import { arquivosDo, dataDo, inteiroDo, regraDo, textoDo } from '@/lib/amostra/formulario';
+import { lerFormulario } from '@/lib/envio';
 
 export const dynamic = 'force-dynamic';
 
 /** Histórico (com as descartadas): ?fundo_id=&limite= */
 export async function GET(request: Request) {
-  return responder(() => {
+  return responder(async () => {
     const p = new URL(request.url).searchParams;
     const fundoId = p.get('fundo_id') ? Number(p.get('fundo_id')) : null;
     const limite = Math.min(200, Math.max(1, Number(p.get('limite') ?? 50) || 50));
-    return Response.json({ items: listar(fundoId, limite) });
+    return Response.json({ items: await listar(fundoId, limite) });
   });
 }
 
@@ -21,7 +22,7 @@ export async function GET(request: Request) {
  */
 export async function POST(request: Request) {
   return responder(async () => {
-    const form = await request.formData();
+    const form = await lerFormulario(request);
     const fundoId = inteiroDo(form, 'fundo_id');
     if (!fundoId) throw new ErroDeUso('Escolha o fundo.');
     const total = { bytes: 0 };

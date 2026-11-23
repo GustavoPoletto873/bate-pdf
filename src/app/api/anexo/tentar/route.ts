@@ -7,8 +7,8 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: Request) {
   return responder(async () => {
     const corpo = await lerJson<{ documento_ids?: number[]; base_id?: string }>(request);
-    const ids = corpo.base_id ? documentosComErro(corpo.base_id) : (corpo.documento_ids ?? []).filter((n) => Number.isInteger(n));
+    const ids = corpo.base_id ? await documentosComErro(corpo.base_id) : (corpo.documento_ids ?? []).filter((n) => Number.isInteger(n));
     if (!ids.length) throw new ErroDeUso('Nenhum documento com erro para tentar de novo.');
-    return Response.json({ reenfileirados: tentarDeNovo(ids) });
+    return Response.json({ reenfileirados: await tentarDeNovo(ids) });
   });
 }

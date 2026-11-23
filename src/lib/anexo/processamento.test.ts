@@ -53,24 +53,25 @@ function deps(cliente: ClienteGemini | null, paginas = 3): Dependencias {
 let baseId: string;
 
 /** PDF gravado direto na pasta da base (sem disparar o indexador, que roda em outro processo). */
-function documentoPdf(loteId: string, nome: string): number {
-  const c = dbMod.db();
+async function documentoPdf(loteId: string, nome: string): Promise<number> {
+  const c = await dbMod.db();
   const bytes = new TextEncoder().encode(`%PDF-1.4 ${nome}`);
   const sha = createHash('sha256').update(bytes).digest('hex');
   mkdirSync(dbMod.pastaDePdfs(baseId), { recursive: true });
   writeFileSync(join(dbMod.pastaDePdfs(baseId), `${sha}.pdf`), bytes);
-  const pdf = repo.registrarPdf(baseId, { nome_arquivo: nome, caminho_relativo: nome, sha256: sha, tamanho: bytes.length });
+  const pdf = await repo.registrarPdf(baseId, { nome_arquivo: nome, caminho_relativo: nome, sha256: sha, tamanho: bytes.length });
   const agora = new Date().toISOString();
   const op = crypto.randomUUID();
-  c.prepare('INSERT INTO anexo_operacoes (id, lote_id, chave) VALUES (?, ?, ?)').run(op, loteId, nome.toLowerCase());
-  const doc = Number(c.prepare(`INSERT INTO anexo_documentos (lote_id, operacao_id, pdf_id, caminho, nome_arquivo, extensao, status, criado_em, atualizado_em)
-    VALUES (?, ?, ?, ?, ?, '.pdf', 'enfileirado', ?, ?)`).run(loteId, op, pdf.id, nome, nome, agora, agora).lastInsertRowid);
-  c.prepare("INSERT INTO jobs (tipo, base_id, documento_id, status, criado_em, atualizado_em) VALUES ('leitura_lastro', ?, ?, 'pending', ?, ?)").run(baseId, doc, agora, agora);
+  await c.prepare('INSERT INTO anexo_operacoes (id, lote_id, chave) VALUES (?, ?, ?)').run(op, loteId, nome.toLowerCase());
+  const doc = Number((await c.prepare(`INSERT INTO anexo_documentos (lote_id, operacao_id, pdf_id, caminho, nome_arquivo, extensao, status, criado_em, atualizado_em)
+    VALUES (?, ?, ?, ?, ?, '.pdf', 'enfileirado', ?, ?)`).run(loteId, op, pdf.id, nome, nome, agora, agora)).lastInsertRowid);
+  await c.prepare("INSERT INTO jobs (tipo, base_id, documento_id, status, criado_em, atualizado_em) VALUES ('leitura_lastro', ?, ?, 'pending', ?, ?)").run(baseId, doc, agora, agora);
   return doc;
 }
 
-const doc = (id: number) => dbMod.db().prepare('SELECT status, motivo, tipo_documento, paginas FROM anexo_documentos WHERE id = ?').get(id) as
-  { status: string; motivo: string | null; tipo_documento: string | null; paginas: number | null };
+const doc = async (id: number) => (await (await dbMod.db()).prepare('SELECT status, motivo, tipo_documento, paginas FROM anexo_documentos WHERE id = ?')
+  .get<{ status: string; motivo: string | null; tipo_documento: string | null; paginas: number | null }>(id))!;
+const sql = async (texto: string) => (await dbMod.db()).prepare(texto);
 
 async function rodarFila(d: Dependencias) {
   fila.definirDependenciasFila(d);
@@ -86,25 +87,25 @@ beforeAll(async () => {
   leituras = await import('@/lib/leituras');
   acomp = await import('./acompanhamento');
   vis = await import('./visualizar');
-  baseId = repo.criarBase({
+  baseId = await repo.criarBase({
     nome: 'Base teste', nome_fundo: 'FIDC EXEMPLO', cnpj_fundo: '12345678000195', data_referencia: '2026-09-30',
     administradora: null, origem: 'amostra', arquivo_origem: 'amostra.xlsx', titulos: [], lados: ['lastro'],
   });
 });
 
 describe('leitura dos documentos do Anexo (fila local + Gemini falso)', () => {
-  test('job que ficou processando ao reiniciar vira falha e não é refeito', () => {
-    const lote = lotes.criarLote(baseId, false);
-    const id = documentoPdf(lote, 'interrompido.pdf');
-    dbMod.db().prepare("UPDATE jobs SET status = 'processing' WHERE documento_id = ?").run(id);
-    expect(fila.recuperarInterrompidos()).toBe(1);
-    expect(doc(id)).toMatchObject({ status: 'erro', motivo: fila.MOTIVO_INTERROMPIDA });
-    const job = dbMod.db().prepare('SELECT status FROM jobs WHERE documento_id = ?').get(id) as { status: string };
-    expect(job.status).toBe('failed');
+  test('job que ficou processando ao reiniciar vira falha e não é refeito', async () => {
+    const lote = await lotes.criarLote(baseId, false);
+    const id = await documentoPdf(lote, 'interrompido.pdf');
+    await (await sql("UPDATE jobs SET status = 'processing' WHERE documento_id = ?")).run(id);
+    expect(await fila.recuperarInterrompidos()).toBe(1);
+    expect(await doc(id)).toMatchObject({ status: 'erro', motivo: fila.MOTIVO_INTERROMPIDA });
+    const job = await (await sql('SELECT status FROM jobs WHERE documento_id = ?')).get<{ status: string }>(id);
+    expect(job?.status).toBe('failed');
   });
 
   test('XML de NF-e é lido localmente; caminho repetido no lote é recusado', async () => {
-    const lote = lotes.criarLote(baseId, true);
+    const lote = await lotes.criarLote(baseId, true);
     const nfe = `<nfeProc><NFe><infNFe Id="NFe35260811222333000181550010000012341000012345"><ide><nNF>77</nNF><dhEmi>2026-08-01T10:00:00-03:00</dhEmi></ide>
       <emit><CNPJ>11222333000181</CNPJ><xNome>EMPRESA FICTICIA LTDA</xNome></emit><dest><CNPJ>98765432000110</CNPJ><xNome>CLIENTE FICTICIO SA</xNome></dest>
       <cobr><dup><nDup>001</nDup><dVenc>2026-09-10</dVenc><vDup>100.00</vDup></dup></cobr></infNFe></NFe></nfeProc>`;
@@ -117,7 +118,7 @@ describe('leitura dos documentos do Anexo (fila local + Gemini falso)', () => {
     expect(r.documentos).toBe(2);
     expect(r.recusados.map((x) => x.caminho).sort()).toEqual(['OP3/leia.txt', 'op1/NOTA.xml', 'solto.xml']);
     await fila.aguardarFilaOciosa();
-    const estado = lotes.obterLote(lote);
+    const estado = await lotes.obterLote(lote);
     const porCaminho = Object.fromEntries(estado.documentos.map((d) => [d.caminho, d]));
     expect(porCaminho['OP1/nota.xml']).toMatchObject({ status: 'lido', tipo_documento: 'nfe_xml', leituras: 1, operacao: 'OP1' });
     expect(porCaminho['OP2/outro.xml']).toMatchObject({ status: 'somente_classificado', motivo: 'XML sem extrator disponível' });
@@ -126,75 +127,75 @@ describe('leitura dos documentos do Anexo (fila local + Gemini falso)', () => {
   });
 
   test('sem chave: erro com o motivo; "Tentar de novo" com o Gemini lê a CCB e registra o uso', async () => {
-    const lote = lotes.criarLote(baseId, false);
-    const id = documentoPdf(lote, 'ccb.pdf');
+    const lote = await lotes.criarLote(baseId, false);
+    const id = await documentoPdf(lote, 'ccb.pdf');
     await rodarFila(deps(null));
-    expect(doc(id)).toMatchObject({ status: 'erro', motivo: 'Configure a chave do Gemini (GEMINI_API_KEY) para ler os documentos' });
-    expect(acomp.acompanhamentoLotes().bases.find((b) => b.base_id === baseId)?.ultimos_erros.some((e) => e.id === id)).toBe(true);
+    expect(await doc(id)).toMatchObject({ status: 'erro', motivo: 'Configure a chave do Gemini (GEMINI_API_KEY) para ler os documentos' });
+    expect((await acomp.acompanhamentoLotes()).bases.find((b) => b.base_id === baseId)?.ultimos_erros.some((e) => e.id === id)).toBe(true);
 
     const chamadas: Chamada[] = [];
     fila.definirDependenciasFila(deps(clienteFalso('ccb', CCB_LIDA, chamadas)));
-    expect(lotes.tentarDeNovo([id])).toBe(1);
+    expect(await lotes.tentarDeNovo([id])).toBe(1);
     await fila.aguardarFilaOciosa();
-    expect(doc(id)).toMatchObject({ status: 'lido', tipo_documento: 'ccb', paginas: 3 });
+    expect(await doc(id)).toMatchObject({ status: 'lido', tipo_documento: 'ccb', paginas: 3 });
     expect(chamadas.map((c) => c.etapa)).toEqual(['classificacao', 'leitura']);
-    const lidas = leituras.listarLeituras(baseId, { documentoId: id });
+    const lidas = await leituras.listarLeituras(baseId, { documentoId: id });
     expect(lidas).toHaveLength(2);
     expect(lidas[0]).toMatchObject({ tipo_recebivel: 'ccb', valor_nominal: '500.50', data_vencimento: '2026-09-10', numero_parcela: 1, quantidade_parcelas: 2, sacado_nome: 'JOÃO DA SILVA' });
     expect(leituras.ladoDaLeitura(lidas[0])).toBe('lastro');
-    const uso = dbMod.db().prepare('SELECT etapa, tokens_entrada, custo_usd FROM uso_ia WHERE documento_id = ? ORDER BY id').all(id) as { etapa: string; tokens_entrada: number; custo_usd: number }[];
+    const uso = await (await sql('SELECT etapa, tokens_entrada, custo_usd FROM uso_ia WHERE documento_id = ? ORDER BY id')).all<{ etapa: string; tokens_entrada: number; custo_usd: number }>(id);
     expect(uso.map((u) => u.etapa)).toEqual(['classificacao', 'leitura']);
     expect(uso[0].custo_usd).toBeCloseTo(2000 * 0.00000025 + 100 * 0.0000015);
 
     // Ler de novo não duplica as leituras do documento.
-    dbMod.db().prepare("UPDATE anexo_documentos SET status = 'erro' WHERE id = ?").run(id);
-    lotes.tentarDeNovo([id]);
+    await (await sql("UPDATE anexo_documentos SET status = 'erro' WHERE id = ?")).run(id);
+    await lotes.tentarDeNovo([id]);
     await fila.aguardarFilaOciosa();
-    expect(leituras.listarLeituras(baseId, { documentoId: id })).toHaveLength(2);
+    expect(await leituras.listarLeituras(baseId, { documentoId: id })).toHaveLength(2);
   });
 
   test('acima de 50 páginas não chama a IA; tipos sem leitura ficam só classificados', async () => {
-    const lote = lotes.criarLote(baseId, false);
-    const grande = documentoPdf(lote, 'grande.pdf');
+    const lote = await lotes.criarLote(baseId, false);
+    const grande = await documentoPdf(lote, 'grande.pdf');
     const chamadas: Chamada[] = [];
     await rodarFila(deps(clienteFalso('ccb', CCB_LIDA, chamadas), 60));
-    expect(doc(grande).status).toBe('erro');
-    expect(doc(grande).motivo).toContain('PDF com 60 páginas excede o limite de 50');
+    expect((await doc(grande)).status).toBe('erro');
+    expect((await doc(grande)).motivo).toContain('PDF com 60 páginas excede o limite de 50');
     expect(chamadas).toHaveLength(0);
 
     for (const [tipo, motivo] of [['cnh', 'Extração adicional não disponível na versão local'], ['garantia', 'Tipo classificado sem leitura por IA'], ['intervencao_humana', 'Tipo sem extração automática']]) {
-      const id = documentoPdf(lote, `${tipo}.pdf`);
+      const id = await documentoPdf(lote, `${tipo}.pdf`);
       await rodarFila(deps(clienteFalso(tipo, null, [])));
-      expect(doc(id)).toMatchObject({ status: 'somente_classificado', tipo_documento: tipo, motivo });
+      expect(await doc(id)).toMatchObject({ status: 'somente_classificado', tipo_documento: tipo, motivo });
     }
   });
 
   test('leitura inválida 3 vezes vira erro com o motivo e o custo das 3 tentativas', async () => {
-    const lote = lotes.criarLote(baseId, false);
-    const id = documentoPdf(lote, 'ruim.pdf');
+    const lote = await lotes.criarLote(baseId, false);
+    const id = await documentoPdf(lote, 'ruim.pdf');
     await rodarFila(deps(clienteFalso('duplicata', { NU_DOCUMENTO: 'X' }, [])));
-    expect(doc(id).status).toBe('erro');
-    expect(doc(id).tipo_documento).toBe('duplicata');
-    expect(doc(id).motivo).toContain('O Gemini não devolveu uma leitura válida em 3 tentativas');
-    const uso = dbMod.db().prepare("SELECT tokens_entrada FROM uso_ia WHERE documento_id = ? AND etapa = 'leitura'").get(id) as { tokens_entrada: number };
-    expect(uso.tokens_entrada).toBe(6000);
+    expect((await doc(id)).status).toBe('erro');
+    expect((await doc(id)).tipo_documento).toBe('duplicata');
+    expect((await doc(id)).motivo).toContain('O Gemini não devolveu uma leitura válida em 3 tentativas');
+    const uso = await (await sql("SELECT tokens_entrada FROM uso_ia WHERE documento_id = ? AND etapa = 'leitura'")).get<{ tokens_entrada: number }>(id);
+    expect(uso?.tokens_entrada).toBe(6000);
   });
 
-  test('Visualizar: filtros sem acento e por dígitos; reaproveitar leitura entre bases do fundo', () => {
-    const r = vis.buscarLeituras({ nome_sacado: 'joao', doc_sacado: '12345678909' });
+  test('Visualizar: filtros sem acento e por dígitos; reaproveitar leitura entre bases do fundo', async () => {
+    const r = await vis.buscarLeituras({ nome_sacado: 'joao', doc_sacado: '12345678909' });
     expect(r.total).toBe(2);
     expect(r.linhas[0].pdf_nome).toBe('ccb.pdf');
-    expect(vis.buscarLeituras({ aquisicao_de: '2030-01-01' }).total).toBe(0);
-    expect(vis.buscarLeituras({}, { ordenarPor: 'valor_nominal', direcao: 'asc' }).linhas[0].valor_nominal).toBe('100.00');
+    expect((await vis.buscarLeituras({ aquisicao_de: '2030-01-01' })).total).toBe(0);
+    expect((await vis.buscarLeituras({}, { ordenarPor: 'valor_nominal', direcao: 'asc' })).linhas[0].valor_nominal).toBe('100.00');
 
-    const outra = repo.criarBase({
+    const outra = await repo.criarBase({
       nome: 'Base 2', nome_fundo: 'FIDC EXEMPLO', cnpj_fundo: '12345678000195', data_referencia: '2026-12-31',
       administradora: null, origem: 'amostra', arquivo_origem: 'a.xlsx', titulos: [], lados: ['lastro'],
     });
-    const total = leituras.listarLeituras(baseId).length;
-    expect(lotes.reaproveitarLeituras(baseId, outra)).toBe(total);
-    expect(lotes.reaproveitarLeituras(baseId, outra)).toBe(0);
-    expect(leituras.listarLeituras(outra).every((l) => l.documento_id === null)).toBe(true);
-    expect(lotes.buscarBases({ data: '2026-11-15', modo: 'TRIMESTRE' }).map((b) => b.id)).toEqual([outra]);
+    const total = (await leituras.listarLeituras(baseId)).length;
+    expect(await lotes.reaproveitarLeituras(baseId, outra)).toBe(total);
+    expect(await lotes.reaproveitarLeituras(baseId, outra)).toBe(0);
+    expect((await leituras.listarLeituras(outra)).every((l) => l.documento_id === null)).toBe(true);
+    expect((await lotes.buscarBases({ data: '2026-11-15', modo: 'TRIMESTRE' })).map((b) => b.id)).toEqual([outra]);
   });
 });

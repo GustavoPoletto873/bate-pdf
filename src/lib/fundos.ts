@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs';
-import { db, transacao } from '@/lib/db';
+import { db, emBlocos, inserirVarios, transacao, type Valor, comandosDeExclusao } from '@/lib/db';
 import { ErroDeUso } from '@/lib/api';
 import { lerAbas, textoDaCelula } from '@/lib/planilha/importar';
 import { digitos as soDigitos, formatarCpfCnpj } from '@/lib/texto';
@@ -150,40 +150,41 @@ function normalizarTipo(tipo: unknown): TipoFundo | null {
 // Administradoras
 // ---------------------------------------------------------------------------
 
-export function listarAdministradoras(): Administradora[] {
-  return db().prepare(`SELECT a.id, a.nome,
+export async function listarAdministradoras(): Promise<Administradora[]> {
+  return (await db()).prepare(`SELECT a.id, a.nome,
       (SELECT COUNT(*) FROM fundos f WHERE f.administradora_id = a.id) AS total_fundos
-    FROM administradoras a ORDER BY a.nome COLLATE NOCASE`).all() as Administradora[];
+    FROM administradoras a ORDER BY a.nome COLLATE NOCASE`).all<Administradora>();
 }
 
-export function criarAdministradora(nome: unknown): Administradora {
+export async function criarAdministradora(nome: unknown): Promise<Administradora> {
   const limpo = textoOuNulo(nome);
   if (!limpo) throw new ErroDeUso('Informe o nome da administradora.');
   if (limpo.length > NOME_ADMINISTRADORA_MAX) throw new ErroDeUso(`O nome da administradora pode ter no máximo ${NOME_ADMINISTRADORA_MAX} caracteres.`);
   const chave = chaveDeNome(limpo);
-  const existente = listarAdministradoras().find((a) => chaveDeNome(a.nome) === chave);
+  const existente = (await listarAdministradoras()).find((a) => chaveDeNome(a.nome) === chave);
   if (existente) throw new ErroDeUso(`Já existe a administradora "${existente.nome}". Escolha-a na lista.`, 409);
-  const r = db().prepare('INSERT INTO administradoras (nome, criado_em) VALUES (?, ?)').run(limpo, agora());
+  const r = await (await db()).prepare('INSERT INTO administradoras (nome, criado_em) VALUES (?, ?)').run(limpo, agora());
   return { id: Number(r.lastInsertRowid), nome: limpo, total_fundos: 0 };
 }
 
 export type DadosAdministradora = { id: number; nome: string; razao_social: string | null; endereco: string | null; endereco_complemento: string | null };
 
 /** Razão social e endereço: o que os relatórios CVM/NIX imprimem da administradora. */
-export function atualizarAdministradora(id: number, dados: { razao_social?: unknown; endereco?: unknown; endereco_complemento?: unknown }): DadosAdministradora {
-  exigirAdministradora(id);
+export async function atualizarAdministradora(id: number, dados: { razao_social?: unknown; endereco?: unknown; endereco_complemento?: unknown }): Promise<DadosAdministradora> {
+  await exigirAdministradora(id);
   const campo = (v: unknown) => {
     const t = textoOuNulo(v);
     if (t && t.length > 300) throw new ErroDeUso('Cada campo pode ter no máximo 300 caracteres.');
     return t;
   };
-  db().prepare('UPDATE administradoras SET razao_social = ?, endereco = ?, endereco_complemento = ? WHERE id = ?')
+  const c = await db();
+  await c.prepare('UPDATE administradoras SET razao_social = ?, endereco = ?, endereco_complemento = ? WHERE id = ?')
     .run(campo(dados.razao_social), campo(dados.endereco), campo(dados.endereco_complemento), id);
-  return db().prepare('SELECT id, nome, razao_social, endereco, endereco_complemento FROM administradoras WHERE id = ?').get(id) as DadosAdministradora;
+  return (await c.prepare('SELECT id, nome, razao_social, endereco, endereco_complemento FROM administradoras WHERE id = ?').get<DadosAdministradora>(id))!;
 }
 
-function exigirAdministradora(id: number) {
-  const ok = db().prepare('SELECT 1 FROM administradoras WHERE id = ?').get(id);
+async function exigirAdministradora(id: number) {
+  const ok = await (await db()).prepare('SELECT 1 FROM administradoras WHERE id = ?').get(id);
   if (!ok) throw new ErroDeUso('Administradora não encontrada. Atualize a página e escolha de novo.', 404);
 }
 
@@ -198,8 +199,8 @@ const SELECT_FUNDO = `SELECT f.id, f.nome, f.cnpj, f.tipo, f.administradora_id, 
 const porNome = (a: Fundo, b: Fundo) => a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' }) || a.id - b.id;
 
 /** Todos os fundos do filtro, por nome (busca sem acento; CNPJ com ou sem máscara). */
-export function filtrarFundos(filtro: FiltroFundos = {}): Fundo[] {
-  const todos = db().prepare(SELECT_FUNDO).all() as Fundo[];
+export async function filtrarFundos(filtro: FiltroFundos = {}): Promise<Fundo[]> {
+  const todos = await (await db()).prepare(SELECT_FUNDO).all<Fundo>();
   const busca = (filtro.busca ?? '').trim();
   const termo = semAcento(busca);
   const cnpj = busca ? digitosDeBuscaPorCnpj(busca) : null;
@@ -213,19 +214,19 @@ export function filtrarFundos(filtro: FiltroFundos = {}): Fundo[] {
     .sort(porNome);
 }
 
-export function listarFundos(filtro: FiltroFundos & { pagina?: number; por_pagina?: number } = {}): PaginaFundos {
+export async function listarFundos(filtro: FiltroFundos & { pagina?: number; por_pagina?: number } = {}): Promise<PaginaFundos> {
   const porPagina = Math.min(200, Math.max(1, filtro.por_pagina ?? 20));
   const pagina = Math.max(1, filtro.pagina ?? 1);
-  const todos = filtrarFundos(filtro);
+  const todos = await filtrarFundos(filtro);
   return { itens: todos.slice((pagina - 1) * porPagina, pagina * porPagina), total: todos.length, pagina, por_pagina: porPagina };
 }
 
-export function obterFundo(id: number): Fundo | null {
-  return (db().prepare(`${SELECT_FUNDO} WHERE f.id = ?`).get(id) as Fundo | undefined) ?? null;
+export async function obterFundo(id: number): Promise<Fundo | null> {
+  return (await (await db()).prepare(`${SELECT_FUNDO} WHERE f.id = ?`).get<Fundo>(id)) ?? null;
 }
 
-export function fundoPorCnpj(cnpj: string): Fundo | null {
-  return (db().prepare(`${SELECT_FUNDO} WHERE f.cnpj = ?`).get(soDigitos(cnpj)) as Fundo | undefined) ?? null;
+export async function fundoPorCnpj(cnpj: string): Promise<Fundo | null> {
+  return (await (await db()).prepare(`${SELECT_FUNDO} WHERE f.cnpj = ?`).get<Fundo>(soDigitos(cnpj))) ?? null;
 }
 
 function validarGestor(gestor: unknown): string | null {
@@ -242,31 +243,31 @@ export type DadosFundo = {
   gestor?: string | null;
 };
 
-export function criarFundo(dados: DadosFundo): Fundo {
+export async function criarFundo(dados: DadosFundo): Promise<Fundo> {
   const nome = textoOuNulo(dados.nome);
   if (!nome) throw new ErroDeUso('Informe o nome do fundo.');
   const cnpj = soDigitos(dados.cnpj);
   if (cnpj.length !== 14) throw new ErroDeUso('O CNPJ precisa ter 14 dígitos.');
   if (!dvCnpjOk(cnpj)) throw new ErroDeUso('CNPJ inválido: o dígito verificador não confere. Confira a digitação.');
-  const existente = fundoPorCnpj(cnpj);
+  const existente = await fundoPorCnpj(cnpj);
   if (existente) throw new ErroDeUso(`Este CNPJ já está cadastrado (${existente.nome}).`, 409);
   const tipo = dados.tipo ? normalizarTipo(dados.tipo) : 'FIDC';
   if (!tipo) throw new ErroDeUso('Tipo de fundo inválido. Use FIDC ou FIC FIDC.');
   const administradora = dados.administradora_id ?? null;
-  if (administradora !== null) exigirAdministradora(administradora);
+  if (administradora !== null) await exigirAdministradora(administradora);
   const gestor = validarGestor(dados.gestor);
   const ts = agora();
-  const r = db().prepare(`INSERT INTO fundos (nome, cnpj, tipo, administradora_id, gestor, criado_em, atualizado_em)
+  const r = await (await db()).prepare(`INSERT INTO fundos (nome, cnpj, tipo, administradora_id, gestor, criado_em, atualizado_em)
     VALUES (?, ?, ?, ?, ?, ?, ?)`).run(nome, cnpj, tipo, administradora, gestor, ts, ts);
-  return obterFundo(Number(r.lastInsertRowid))!;
+  return (await obterFundo(r.lastInsertRowid))!;
 }
 
 /**
  * Edita o fundo (update_name do Bate Lastro). O CNPJ não muda. Só os campos presentes mudam:
  * `administradora_id: null` deixa sem administradora e gestor vazio limpa o gestor.
  */
-export function atualizarFundo(id: number, dados: Partial<Omit<DadosFundo, 'cnpj'>>): Fundo {
-  const atual = obterFundo(id);
+export async function atualizarFundo(id: number, dados: Partial<Omit<DadosFundo, 'cnpj'>>): Promise<Fundo> {
+  const atual = await obterFundo(id);
   if (!atual) throw new ErroDeUso('Fundo não encontrado. Atualize a lista.', 404);
   const sets: string[] = [];
   const valores: (string | number | null)[] = [];
@@ -282,53 +283,52 @@ export function atualizarFundo(id: number, dados: Partial<Omit<DadosFundo, 'cnpj
   }
   if ('administradora_id' in dados) {
     const adm = dados.administradora_id ?? null;
-    if (adm !== null) exigirAdministradora(adm);
+    if (adm !== null) await exigirAdministradora(adm);
     sets.push('administradora_id = ?'); valores.push(adm);
   }
   if ('gestor' in dados) {
     sets.push('gestor = ?'); valores.push(validarGestor(dados.gestor));
   }
-  if (sets.length) db().prepare(`UPDATE fundos SET ${sets.join(', ')}, atualizado_em = ? WHERE id = ?`).run(...valores, agora(), id);
-  return obterFundo(id)!;
+  if (sets.length) await (await db()).prepare(`UPDATE fundos SET ${sets.join(', ')}, atualizado_em = ? WHERE id = ?`).run(...valores, agora(), id);
+  return (await obterFundo(id))!;
 }
 
 /**
  * Aplica a mesma administradora e/ou gestor a vários fundos (atualizar_em_lote). Campo ausente
  * mantém o atual; gestor vazio limpa.
  */
-export function atualizarEmLote(ids: number[], dados: { administradora_id?: number | null; gestor?: string | null }): number {
+export async function atualizarEmLote(ids: number[], dados: { administradora_id?: number | null; gestor?: string | null }): Promise<number> {
   const unicos = [...new Set(ids.map(Number).filter(Number.isInteger))];
   if (!unicos.length) throw new ErroDeUso('Selecione ao menos um fundo.');
   if (!('administradora_id' in dados) && !('gestor' in dados)) throw new ErroDeUso('Escolha a administradora ou o gestor a aplicar.');
-  const c = db();
-  const existentes = (c.prepare(`SELECT COUNT(*) n FROM fundos WHERE id IN (${unicos.map(() => '?').join(',')})`).get(...unicos) as { n: number }).n;
+  const c = await db();
+  const existentes = (await c.prepare(`SELECT COUNT(*) n FROM fundos WHERE id IN (${unicos.map(() => '?').join(',')})`).get<{ n: number }>(...unicos))!.n;
   if (existentes !== unicos.length) throw new ErroDeUso('Algum fundo selecionado não foi encontrado. Atualize a lista e tente de novo.', 404);
   const adm = 'administradora_id' in dados ? dados.administradora_id ?? null : undefined;
-  if (adm) exigirAdministradora(adm);
+  if (adm) await exigirAdministradora(adm);
   const gestor = 'gestor' in dados ? validarGestor(dados.gestor) : undefined;
-  transacao(() => {
-    const ts = agora();
-    for (const id of unicos) {
-      if (adm !== undefined) c.prepare('UPDATE fundos SET administradora_id = ?, atualizado_em = ? WHERE id = ?').run(adm, ts, id);
-      if (gestor !== undefined) c.prepare('UPDATE fundos SET gestor = ?, atualizado_em = ? WHERE id = ?').run(gestor, ts, id);
-    }
-  });
+  // Um UPDATE só para todos os ids (no Turso, uma ida por fundo seria lenta).
+  const sets: string[] = [];
+  const valores: Valor[] = [];
+  if (adm !== undefined) { sets.push('administradora_id = ?'); valores.push(adm); }
+  if (gestor !== undefined) { sets.push('gestor = ?'); valores.push(gestor); }
+  await c.prepare(`UPDATE fundos SET ${sets.join(', ')}, atualizado_em = ? WHERE id IN (${unicos.map(() => '?').join(',')})`).run(...valores, agora(), ...unicos);
   return unicos.length;
 }
 
-function contar(sql: string, ...params: (string | number)[]): number {
+async function contar(sql: string, ...params: (string | number)[]): Promise<number> {
   try {
-    return (db().prepare(sql).get(...params) as { n: number }).n;
+    return (await (await db()).prepare(sql).get<{ n: number }>(...params))!.n;
   } catch {
     return 0; // tabela de outro módulo ainda não existe
   }
 }
 
 /** O que depende do fundo (para o aviso antes de excluir). */
-export function usoDoFundo(id: number): { bases: number; amostragens: number } {
+export async function usoDoFundo(id: number): Promise<{ bases: number; amostragens: number }> {
   return {
-    bases: contar('SELECT COUNT(*) n FROM bases WHERE fundo_id = ?', id),
-    amostragens: contar('SELECT COUNT(*) n FROM amostragens WHERE fundo_id = ?', id),
+    bases: await contar('SELECT COUNT(*) n FROM bases WHERE fundo_id = ?', id),
+    amostragens: await contar('SELECT COUNT(*) n FROM amostragens WHERE fundo_id = ?', id),
   };
 }
 
@@ -336,12 +336,13 @@ export function usoDoFundo(id: number): { bases: number; amostragens: number } {
  * Exclui o fundo. As bases continuam funcionando (guardam nome e CNPJ do fundo); só perdem a
  * ligação com o cadastro (fundo_id = null). As amostras sorteadas do fundo vão junto.
  */
-export function excluirFundo(id: number): void {
-  if (!obterFundo(id)) throw new ErroDeUso('Fundo não encontrado. Atualize a lista.', 404);
-  transacao(() => {
-    db().prepare('UPDATE bases SET fundo_id = NULL WHERE fundo_id = ?').run(id);
-    db().prepare('DELETE FROM fundos WHERE id = ?').run(id);
-  });
+export async function excluirFundo(id: number): Promise<void> {
+  if (!(await obterFundo(id))) throw new ErroDeUso('Fundo não encontrado. Atualize a lista.', 404);
+  const c = await db();
+  await c.lote([
+    { sql: 'UPDATE bases SET fundo_id = NULL WHERE fundo_id = ?', args: [id] },
+    ...await comandosDeExclusao(c, 'fundos', 'id = ?', [id]),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -388,14 +389,15 @@ export async function importarFundos(conteudo: Uint8Array, nomeArquivo: string, 
   const nomeAdm = new Map<number, string>();
   const porChave = new Map<string, number>();
   const ambiguas = new Set<string>();
-  for (const a of db().prepare('SELECT id, nome FROM administradoras ORDER BY id').all() as { id: number; nome: string }[]) {
+  const c = await db();
+  for (const a of await c.prepare('SELECT id, nome FROM administradoras ORDER BY id').all<{ id: number; nome: string }>()) {
     nomeAdm.set(a.id, a.nome);
     const chave = chaveDeNome(a.nome);
     if (porChave.has(chave)) ambiguas.add(chave);
     else porChave.set(chave, a.id);
   }
   const existentes = new Map<string, Fundo>();
-  for (const f of (db().prepare(`${SELECT_FUNDO} ORDER BY f.id`).all() as Fundo[])) {
+  for (const f of await c.prepare(`${SELECT_FUNDO} ORDER BY f.id`).all<Fundo>()) {
     if (!existentes.has(f.cnpj)) existentes.set(f.cnpj, f);
   }
 
@@ -472,16 +474,16 @@ export async function importarFundos(conteudo: Uint8Array, nomeArquivo: string, 
   }
 
   if (!simular && (novos.length || mudancas.length)) {
-    const c = db();
-    transacao(() => {
+    await transacao(async (tx) => {
       const ts = agora();
-      const inserir = c.prepare(`INSERT INTO fundos (nome, cnpj, tipo, administradora_id, gestor, criado_em, atualizado_em)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`);
-      for (const f of novos) inserir.run(f.nome, f.cnpj, f.tipo, f.administradora_id, f.gestor, ts, ts);
+      await inserirVarios(tx, 'fundos', ['nome', 'cnpj', 'tipo', 'administradora_id', 'gestor', 'criado_em', 'atualizado_em'],
+        novos.map((f) => [f.nome, f.cnpj, f.tipo, f.administradora_id, f.gestor, ts, ts]));
+      const comandos: { sql: string; args: Valor[] }[] = [];
       for (const m of mudancas) {
-        if (m.administradora_id !== undefined) c.prepare('UPDATE fundos SET administradora_id = ?, atualizado_em = ? WHERE id = ?').run(m.administradora_id, ts, m.id);
-        if (m.gestor !== undefined) c.prepare('UPDATE fundos SET gestor = ?, atualizado_em = ? WHERE id = ?').run(m.gestor, ts, m.id);
+        if (m.administradora_id !== undefined) comandos.push({ sql: 'UPDATE fundos SET administradora_id = ?, atualizado_em = ? WHERE id = ?', args: [m.administradora_id, ts, m.id] });
+        if (m.gestor !== undefined) comandos.push({ sql: 'UPDATE fundos SET gestor = ?, atualizado_em = ? WHERE id = ?', args: [m.gestor, ts, m.id] });
       }
+      for (const bloco of emBlocos(comandos, 200)) await tx.lote(bloco);
     });
   }
   return resultado;
@@ -507,6 +509,6 @@ export async function gerarModeloFundos(): Promise<Uint8Array> {
   administradores.addRow(['Administrador']);
   administradores.getRow(1).font = { bold: true };
   administradores.getColumn(1).width = 40;
-  for (const a of listarAdministradoras()) administradores.addRow([a.nome]);
+  for (const a of await listarAdministradoras()) administradores.addRow([a.nome]);
   return new Uint8Array(await livro.xlsx.writeBuffer() as ArrayBuffer);
 }

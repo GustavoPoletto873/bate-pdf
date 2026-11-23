@@ -6,7 +6,7 @@ import ExcelJS from 'exceljs';
 
 // Banco num diretório temporário; dados fictícios.
 process.env.BATE_PDF_DADOS = mkdtempSync(join(tmpdir(), 'bate-pdf-fundos-'));
-delete (globalThis as { __batePdfDb?: unknown }).__batePdfDb;
+delete (globalThis as { __lastroDb?: unknown }).__lastroDb;
 
 type Fundos = typeof import('@/lib/fundos');
 let f: Fundos;
@@ -69,47 +69,47 @@ describe('regras do CNPJ (iguais ao Bate Lastro)', () => {
 });
 
 describe('cadastro, lista e exclusão', () => {
-  test('cria, recusa repetido e DV errado, edita, filtra, lote e exclui', () => {
-    const adm = f.criarAdministradora('Administradora Fictícia');
-    expect(() => f.criarAdministradora('administradora ficticia')).toThrow(/Já existe/);
-    const a = f.criarFundo({ nome: 'FIDC Alfa', cnpj: '11.222.333/0001-81', administradora_id: adm.id, tipo: 'FIDC' });
+  test('cria, recusa repetido e DV errado, edita, filtra, lote e exclui', async () => {
+    const adm = await f.criarAdministradora('Administradora Fictícia');
+    await expect(f.criarAdministradora('administradora ficticia')).rejects.toThrow(/Já existe/);
+    const a = await f.criarFundo({ nome: 'FIDC Alfa', cnpj: '11.222.333/0001-81', administradora_id: adm.id, tipo: 'FIDC' });
     expect(a.cnpj).toBe('11222333000181');
     expect(a.administradora_nome).toBe('Administradora Fictícia');
-    expect(() => f.criarFundo({ nome: 'Outro', cnpj: '11222333000181' })).toThrow(/já está cadastrado/);
-    expect(() => f.criarFundo({ nome: 'Outro', cnpj: '11222333000182' })).toThrow(/dígito verificador/);
-    const b = f.criarFundo({ nome: 'FIDC Beta Crédito', cnpj: comDv('223334440001'), tipo: 'FIC FIDC' });
+    await expect(f.criarFundo({ nome: 'Outro', cnpj: '11222333000181' })).rejects.toThrow(/já está cadastrado/);
+    await expect(f.criarFundo({ nome: 'Outro', cnpj: '11222333000182' })).rejects.toThrow(/dígito verificador/);
+    const b = await f.criarFundo({ nome: 'FIDC Beta Crédito', cnpj: comDv('223334440001'), tipo: 'FIC FIDC' });
     expect(b.tipo).toBe('FIC_FIDC');
 
-    expect(f.listarFundos({ busca: 'credito' }).itens.map((x) => x.id)).toEqual([b.id]);
-    expect(f.listarFundos({ busca: '11.222' }).itens.map((x) => x.id)).toEqual([a.id]);
-    expect(f.listarFundos({ administradora: 0 }).itens.map((x) => x.id)).toEqual([b.id]);
-    expect(f.listarFundos({ por_pagina: 1, pagina: 2 })).toMatchObject({ total: 2, itens: [{ id: b.id }] });
+    expect((await f.listarFundos({ busca: 'credito' })).itens.map((x) => x.id)).toEqual([b.id]);
+    expect((await f.listarFundos({ busca: '11.222' })).itens.map((x) => x.id)).toEqual([a.id]);
+    expect((await f.listarFundos({ administradora: 0 })).itens.map((x) => x.id)).toEqual([b.id]);
+    expect(await f.listarFundos({ por_pagina: 1, pagina: 2 })).toMatchObject({ total: 2, itens: [{ id: b.id }] });
 
-    expect(f.atualizarFundo(b.id, { gestor: 'Gestora Exemplo', administradora_id: adm.id }).gestor).toBe('Gestora Exemplo');
-    expect(f.atualizarFundo(b.id, { administradora_id: null }).administradora_id).toBeNull();
-    expect(f.atualizarEmLote([a.id, b.id], { gestor: 'Nova Gestora' })).toBe(2);
-    expect(f.obterFundo(a.id)!.gestor).toBe('Nova Gestora');
-    expect(f.obterFundo(a.id)!.administradora_id).toBe(adm.id);
-    expect(() => f.atualizarEmLote([a.id, 9999], { gestor: 'x' })).toThrow(/não foi encontrado/);
+    expect((await f.atualizarFundo(b.id, { gestor: 'Gestora Exemplo', administradora_id: adm.id })).gestor).toBe('Gestora Exemplo');
+    expect((await f.atualizarFundo(b.id, { administradora_id: null })).administradora_id).toBeNull();
+    expect(await f.atualizarEmLote([a.id, b.id], { gestor: 'Nova Gestora' })).toBe(2);
+    expect((await f.obterFundo(a.id))!.gestor).toBe('Nova Gestora');
+    expect((await f.obterFundo(a.id))!.administradora_id).toBe(adm.id);
+    await expect(f.atualizarEmLote([a.id, 9999], { gestor: 'x' })).rejects.toThrow(/não foi encontrado/);
 
-    const baseId = repo.criarBase({
+    const baseId = await repo.criarBase({
       nome: 'Base', nome_fundo: 'FIDC Alfa', cnpj_fundo: a.cnpj, data_referencia: '2026-09-30', administradora: null,
       origem: 'amostra', arquivo_origem: 'x.xlsx', titulos: [], fundo_id: a.id,
     });
-    expect(f.usoDoFundo(a.id).bases).toBe(1);
-    f.excluirFundo(a.id);
-    expect(f.obterFundo(a.id)).toBeNull();
-    expect(repo.obterBase(baseId)).toMatchObject({ fundo_id: null, nome_fundo: 'FIDC Alfa' });
+    expect((await f.usoDoFundo(a.id)).bases).toBe(1);
+    await f.excluirFundo(a.id);
+    expect(await f.obterFundo(a.id)).toBeNull();
+    expect(await repo.obterBase(baseId)).toMatchObject({ fundo_id: null, nome_fundo: 'FIDC Alfa' });
   });
 });
 
 describe('importação em lote (create_all)', () => {
   test('prévia e gravação seguem as regras do Bate Lastro', async () => {
-    const adm = f.criarAdministradora('Adm Importação');
-    f.criarAdministradora('Gestão São Pedro');
+    const adm = await f.criarAdministradora('Adm Importação');
+    await f.criarAdministradora('Gestão São Pedro');
     // Duas com o mesmo nome sem acento (só dá para acontecer com dados antigos: o cadastro recusa).
-    (await import('@/lib/db')).db().prepare("INSERT INTO administradoras (nome, criado_em) VALUES ('Gestao Sao Pedro', 'x')").run();
-    const existente = f.criarFundo({ nome: 'FIDC Existente', cnpj: comDv('334445550001') });
+    await (await (await import('@/lib/db')).db()).prepare("INSERT INTO administradoras (nome, criado_em) VALUES ('Gestao Sao Pedro', 'x')").run();
+    const existente = await f.criarFundo({ nome: 'FIDC Existente', cnpj: comDv('334445550001') });
     const novo = comDv('445556660001');
     const repetido = comDv('556667770001');
     const arquivo = await xlsx({
@@ -144,12 +144,12 @@ describe('importação em lote (create_all)', () => {
     expect(motivos[9]).toMatch(/preencha o nome/);
     expect(motivos[10]).toMatch(/Tipo de fundo inválido/);
     expect(motivos[12]).toMatch(/notação científica/);
-    expect(f.fundoPorCnpj(novo)).toBeNull();
+    expect(await f.fundoPorCnpj(novo)).toBeNull();
 
     const gravado = await f.importarFundos(arquivo, 'fundos.xlsx', false);
     expect(gravado.inseridos).toHaveLength(2);
-    expect(f.fundoPorCnpj(novo)).toMatchObject({ nome: 'FIDC Novo', tipo: 'FIC_FIDC', administradora_id: adm.id, gestor: 'Gestora X' });
-    expect(f.fundoPorCnpj(existente.cnpj)).toMatchObject({ nome: 'FIDC Existente', tipo: 'FIDC', administradora_id: adm.id });
+    expect(await f.fundoPorCnpj(novo)).toMatchObject({ nome: 'FIDC Novo', tipo: 'FIC_FIDC', administradora_id: adm.id, gestor: 'Gestora X' });
+    expect(await f.fundoPorCnpj(existente.cnpj)).toMatchObject({ nome: 'FIDC Existente', tipo: 'FIDC', administradora_id: adm.id });
     // De novo: nada a mudar.
     const deNovo = await f.importarFundos(arquivo, 'fundos.xlsx', true);
     expect(deNovo.inseridos).toHaveLength(0);

@@ -1,5 +1,6 @@
 'use client';
 
+import { formularioParaNuvem, NUVEM } from '@/lib/cliente/envio';
 import type { BaseResumo, PdfInfo, PendenciaLinha, ResultadoBusca, OperacaoMarcacao, PedidoVinculo } from '@/lib/repo';
 
 /** Chamadas à API do próprio app (navegador). Erro de uso volta com a mensagem da tela. */
@@ -13,6 +14,13 @@ export class ErroApi extends Error {
 /** Chamada comum (use nos clientes de cada módulo, em src/lib/cliente/<modulo>.ts). */
 export async function chamar<T>(url: string, init?: RequestInit): Promise<T> {
   let resposta: Response;
+  if (NUVEM && init?.body instanceof FormData) {
+    try {
+      init = { ...init, body: await formularioParaNuvem(init.body) };
+    } catch (e) {
+      throw new ErroApi(`Não foi possível enviar o arquivo: ${e instanceof Error ? e.message : String(e)}`, 0);
+    }
+  }
   try {
     resposta = await fetch(url, init);
   } catch {
@@ -20,6 +28,11 @@ export async function chamar<T>(url: string, init?: RequestInit): Promise<T> {
   }
   const tipo = resposta.headers.get('content-type') ?? '';
   const dados = tipo.includes('application/json') ? await resposta.json() : null;
+  if (resposta.status === 401 && (dados as { entrar?: boolean })?.entrar) {
+    // Sessão terminou (login ligado): volta para a tela de entrar e depois para esta página.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+    window.location.href = '/entrar?voltar=' + encodeURIComponent(window.location.pathname + window.location.search);
+  }
   if (!resposta.ok) {
     throw new ErroApi((dados as { erro?: string })?.erro ?? `Erro ${resposta.status}`, resposta.status, dados);
   }

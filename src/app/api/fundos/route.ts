@@ -9,14 +9,14 @@ export const dynamic = 'force-dynamic';
  * (para as listas de escolha das outras telas).
  */
 export async function GET(request: Request) {
-  return responder(() => {
+  return responder(async () => {
     const url = new URL(request.url);
     const filtro = filtroDaUrl(url);
     if (url.searchParams.get('todos') === '1') {
-      const itens = filtrarFundos(filtro);
+      const itens = await filtrarFundos(filtro);
       return Response.json({ itens, total: itens.length, pagina: 1, por_pagina: itens.length });
     }
-    return Response.json(listarFundos({
+    return Response.json(await listarFundos({
       ...filtro,
       pagina: Number(url.searchParams.get('pagina')) || 1,
       por_pagina: Number(url.searchParams.get('por_pagina')) || 20,
@@ -27,6 +27,6 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   return responder(async () => {
     const dados = await lerJson<DadosFundo>(request);
-    return Response.json({ fundo: criarFundo(dados) }, { status: 201 });
+    return Response.json({ fundo: await criarFundo(dados) }, { status: 201 });
   });
 }

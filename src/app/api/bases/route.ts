@@ -2,11 +2,12 @@ import { ErroDeUso, responder } from '@/lib/api';
 import { criarBase, listarBases } from '@/lib/repo';
 import { lerPlanilha } from '@/lib/planilha/importar';
 import type { Lado } from '@/lib/campos';
+import { lerFormulario } from '@/lib/envio';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  return responder(() => Response.json({ bases: listarBases() }));
+  return responder(async () => Response.json({ bases: await listarBases() }));
 }
 
 /**
@@ -18,7 +19,7 @@ export async function GET() {
  */
 export async function POST(request: Request) {
   return responder(async () => {
-    const form = await request.formData();
+    const form = await lerFormulario(request);
     const arquivo = form.get('arquivo');
     if (!(arquivo instanceof File)) throw new ErroDeUso('Envie a planilha da base.');
     const conteudo = new Uint8Array(await arquivo.arrayBuffer());
@@ -53,7 +54,7 @@ export async function POST(request: Request) {
     const cnpj = cnpjInformado ?? lido.cnpj_fundo;
     const dataRef = campo('data_referencia');
     const nome = campo('nome') ?? [nomeFundo ?? arquivo.name.replace(/\.[^.]+$/, ''), dataRef].filter(Boolean).join(' — ');
-    const id = criarBase({
+    const id = await criarBase({
       nome,
       nome_fundo: nomeFundo,
       cnpj_fundo: cnpj,

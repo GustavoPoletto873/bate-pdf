@@ -6,6 +6,8 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
   if (process.env.NEXT_PHASE === 'phase-production-build') return;
+  // Na nuvem não há servidor contínuo: a fila é retomada pelas rotas que acompanham os lotes.
+  if (process.env.VERCEL) return;
   const { iniciarFila } = await import('@/lib/anexo/fila');
-  iniciarFila();
+  void iniciarFila();
 }

@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { db, pastaDeDados, pastaDePdfs, transacao } from '@/lib/db';
-import { apagarLeiturasDoDocumento, inserirLeituras, type NovaLeitura } from '@/lib/leituras';
+import { chaveDoPdf, lerArquivo } from '@/lib/arquivos';
+import { db, inserirVarios, transacao, type Valor, excluir } from '@/lib/db';
+import { normalizarLeitura, type NovaLeitura } from '@/lib/leituras';
 import type { ClienteGemini } from '@/lib/ia/cliente';
 import { custoUsd, MENSAGEM_SEM_CHAVE, semSegredo } from '@/lib/ia/config';
 import { classificarDocumento, lerComConfig, lerDocumento, somarTentativas } from '@/lib/ia/leitura';
@@ -52,16 +51,16 @@ export class LeituraRecusada extends Error {
   }
 }
 
-export function atualizarDocumento(id: number, campos: { status: string; motivo?: string | null; tipo_documento?: string | null; paginas?: number | null }): void {
-  db().prepare(`UPDATE anexo_documentos SET status = ?, motivo = ?, tipo_documento = COALESCE(?, tipo_documento),
+export async function atualizarDocumento(id: number, campos: { status: string; motivo?: string | null; tipo_documento?: string | null; paginas?: number | null }): Promise<void> {
+  await (await db()).prepare(`UPDATE anexo_documentos SET status = ?, motivo = ?, tipo_documento = COALESCE(?, tipo_documento),
       paginas = COALESCE(?, paginas), atualizado_em = ? WHERE id = ?`)
     .run(campos.status, campos.motivo ?? null, campos.tipo_documento ?? null, campos.paginas ?? null, agora(), id);
 }
 
-function registrarUso(doc: Documento, etapa: string, modelo: string, tentativas: Tentativa[], mensagem: string): void {
+async function registrarUso(doc: Documento, etapa: string, modelo: string, tentativas: Tentativa[], mensagem: string): Promise<void> {
   if (!tentativas.length) return;
   const { tokensEntrada, tokensSaida } = somarTentativas(tentativas);
-  db().prepare(`INSERT INTO uso_ia (base_id, documento_id, etapa, modelo, tokens_entrada, tokens_saida, custo_usd, criado_em, mensagem)
+  await (await db()).prepare(`INSERT INTO uso_ia (base_id, documento_id, etapa, modelo, tokens_entrada, tokens_saida, custo_usd, criado_em, mensagem)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(doc.base_id, doc.id, etapa, modelo, tokensEntrada, tokensSaida, custoUsd(modelo, tokensEntrada, tokensSaida), agora(), mensagem.slice(0, 500));
 }
 
@@ -87,35 +86,41 @@ export function motivoDoErro(e: unknown): string {
   return 'Falha inesperada na leitura. Use “Tentar de novo”; se repetir, veja o terminal do app.';
 }
 
-function carregar(documentoId: number): Documento {
-  const doc = db().prepare(`SELECT d.id, d.lote_id, d.operacao_id, d.pdf_id, d.caminho, d.extensao, d.arquivo, l.base_id, p.sha256
+async function carregar(documentoId: number): Promise<Documento> {
+  const doc = await (await db()).prepare(`SELECT d.id, d.lote_id, d.operacao_id, d.pdf_id, d.caminho, d.extensao, d.arquivo, l.base_id, p.sha256
     FROM anexo_documentos d JOIN anexo_lotes l ON l.id = d.lote_id LEFT JOIN pdfs p ON p.id = d.pdf_id
-    WHERE d.id = ?`).get(documentoId) as Documento | undefined;
+    WHERE d.id = ?`).get<Documento>(documentoId);
   if (!doc) throw new LeituraRecusada('Documento não encontrado (o lote ou a base foi excluído).');
   return doc;
 }
 
-function gravarLeituras(doc: Documento, linhas: NovaLeitura[]): void {
-  transacao(() => {
-    apagarLeiturasDoDocumento(doc.id);
-    inserirLeituras(doc.base_id, linhas, { emTransacao: false });
+/** Troca as leituras do documento pelas novas (numa transação, as inserções em lote). */
+async function gravarLeituras(doc: Documento, linhas: NovaLeitura[]): Promise<void> {
+  await transacao(async (tx) => {
+    await excluir(tx, 'leituras', 'documento_id = ?', [doc.id]);
+    if (!linhas.length) return;
+    const normalizadas = linhas.map(normalizarLeitura);
+    const colunas = Object.keys(normalizadas[0]) as (keyof (typeof normalizadas)[number])[];
+    await inserirVarios(tx, 'leituras', ['base_id', ...colunas], normalizadas.map((n) => [doc.base_id, ...colunas.map((c) => n[c])] as Valor[]));
   });
 }
 
-function concluir(doc: Documento, r: ResultadoDocumento): ResultadoDocumento {
-  atualizarDocumento(doc.id, { status: r.situacao, motivo: r.motivo, tipo_documento: r.tipo_documento });
+async function concluir(doc: Documento, r: ResultadoDocumento): Promise<ResultadoDocumento> {
+  await atualizarDocumento(doc.id, { status: r.situacao, motivo: r.motivo, tipo_documento: r.tipo_documento });
   return r;
 }
 
-function processarXml(doc: Documento): ResultadoDocumento {
+async function processarXml(doc: Documento): Promise<ResultadoDocumento> {
   if (!doc.arquivo) throw new LeituraRecusada('O arquivo XML não está mais na pasta de dados. Envie de novo.');
-  const conteudo = new TextDecoder('utf-8').decode(readFileSync(join(pastaDeDados(), doc.arquivo)));
+  const bruto = await lerArquivo(doc.arquivo);
+  if (!bruto) throw new LeituraRecusada('O arquivo XML não está mais no armazenamento. Envie de novo.');
+  const conteudo = new TextDecoder('utf-8').decode(bruto);
   const r = lerXmlDocumento(conteudo);
   if (r.tipo === 'outro_xml') return concluir(doc, { situacao: 'somente_classificado', tipo_documento: 'outro_xml', motivo: 'XML sem extrator disponível', linhas: 0 });
   const linhas = leiturasDaNfe(r.registros, { operacaoId: doc.operacao_id, documentoId: doc.id });
-  gravarLeituras(doc, linhas);
+  await gravarLeituras(doc, linhas);
   // NF Status: a situação que o protocolo do XML traz (a consulta no SERPRO pode atualizar depois).
-  registrarNota({ chave_nfe: r.chave_nfe, base_id: doc.base_id, status_nfe: r.status_nfe, origem: 'xml_anexo', xml_content: conteudo });
+  await registrarNota({ chave_nfe: r.chave_nfe, base_id: doc.base_id, status_nfe: r.status_nfe, origem: 'xml_anexo', xml_content: conteudo });
   return concluir(doc, { situacao: 'lido', tipo_documento: 'nfe_xml', motivo: null, linhas: linhas.length, bruto: { chave_nfe: r.chave_nfe, status_nfe: r.status_nfe } });
 }
 
@@ -123,12 +128,14 @@ async function processarPdf(doc: Documento, deps: Dependencias): Promise<Resulta
   if (!doc.pdf_id || !doc.sha256) throw new LeituraRecusada('O PDF não está mais na base. Envie de novo.');
   let bytes: Uint8Array;
   try {
-    bytes = new Uint8Array(readFileSync(join(pastaDePdfs(doc.base_id), `${doc.sha256}.pdf`)));
+    const lido = await lerArquivo(chaveDoPdf(doc.base_id, doc.sha256));
+    if (!lido) throw new Error('ausente');
+    bytes = lido;
   } catch {
-    throw new LeituraRecusada('O arquivo do PDF não está mais na pasta de dados. Envie de novo.');
+    throw new LeituraRecusada('O arquivo do PDF não está mais no armazenamento. Envie de novo.');
   }
   const paginas = await deps.contarPaginas(bytes);
-  atualizarDocumento(doc.id, { status: 'classificando', paginas });
+  await atualizarDocumento(doc.id, { status: 'classificando', paginas });
   if (paginas > deps.maxPaginas) {
     throw new LeituraRecusada(`PDF com ${paginas} páginas excede o limite de ${deps.maxPaginas} para envio à IA. Separe o documento em partes menores.`);
   }
@@ -137,26 +144,26 @@ async function processarPdf(doc: Documento, deps: Dependencias): Promise<Resulta
   const opcoes = { modelo: deps.modelo, esperar: deps.esperar };
 
   // Tipos treinados (Gestão › Treinar IA) entram na classificação, antes dos fallbacks.
-  const treinados = tiposAtivos();
+  const treinados = await tiposAtivos();
   let tipo: string;
   try {
     const c = await classificarDocumento(cliente, bytes, opcoes, treinados);
-    registrarUso(doc, 'classificacao', deps.modelo, c.tentativas, 'Sucesso');
+    await registrarUso(doc, 'classificacao', deps.modelo, c.tentativas, 'Sucesso');
     tipo = c.tipo;
   } catch (e) {
-    if (e instanceof FalhaGeminiComCusto) registrarUso(doc, 'classificacao', deps.modelo, e.tentativas, `Erro após tentativas (custo cobrado): ${semSegredo(e.message)}`);
+    if (e instanceof FalhaGeminiComCusto) await registrarUso(doc, 'classificacao', deps.modelo, e.tentativas, `Erro após tentativas (custo cobrado): ${semSegredo(e.message)}`);
     throw e;
   }
 
   const treinado = treinados.find((t) => t.slug === tipo);
   if (LEITORES[tipo] || treinado) {
-    atualizarDocumento(doc.id, { status: 'extraindo', tipo_documento: tipo });
+    await atualizarDocumento(doc.id, { status: 'extraindo', tipo_documento: tipo });
     let leitura;
     try {
       leitura = treinado ? await lerComConfig(cliente, bytes, treinado, opcoes) : await lerDocumento(cliente, bytes, tipo, opcoes);
-      registrarUso(doc, 'leitura', deps.modelo, leitura.tentativas, leitura.registros.length ? 'Sucesso' : 'Nenhum dado extraído');
+      await registrarUso(doc, 'leitura', deps.modelo, leitura.tentativas, leitura.registros.length ? 'Sucesso' : 'Nenhum dado extraído');
     } catch (e) {
-      if (e instanceof FalhaGeminiComCusto) registrarUso(doc, 'leitura', deps.modelo, e.tentativas, `Erro após tentativas (custo cobrado): ${semSegredo(e.message)}`);
+      if (e instanceof FalhaGeminiComCusto) await registrarUso(doc, 'leitura', deps.modelo, e.tentativas, `Erro após tentativas (custo cobrado): ${semSegredo(e.message)}`);
       // O tipo já é conhecido: o documento com erro mostra o que ele é.
       if (e && typeof e === 'object') (e as { tipoDocumento?: string }).tipoDocumento = tipo;
       throw e;
@@ -165,7 +172,7 @@ async function processarPdf(doc: Documento, deps: Dependencias): Promise<Resulta
     const linhas = leitura.registros.map((r) => leituraDoRegistro(r, {
       tipoDocumento: tipo, tipoRecebivel: tipo, operacaoId: doc.operacao_id, pdfId: doc.pdf_id, documentoId: doc.id,
     }));
-    gravarLeituras(doc, linhas);
+    await gravarLeituras(doc, linhas);
     return concluir(doc, { situacao: 'lido', tipo_documento: tipo, motivo: null, linhas: linhas.length, bruto: leitura.dados });
   }
   if (TIPOS_ADICIONAIS.has(tipo)) {
@@ -182,13 +189,13 @@ async function processarPdf(doc: Documento, deps: Dependencias): Promise<Resulta
  * sobe (o job fica 'failed').
  */
 export async function processarDocumento(documentoId: number, deps: Dependencias): Promise<ResultadoDocumento> {
-  const doc = carregar(documentoId);
-  atualizarDocumento(doc.id, { status: 'classificando' });
+  const doc = await carregar(documentoId);
+  await atualizarDocumento(doc.id, { status: 'classificando' });
   try {
-    return (doc.extensao ?? '').toLowerCase() === '.xml' ? processarXml(doc) : await processarPdf(doc, deps);
+    return (doc.extensao ?? '').toLowerCase() === '.xml' ? await processarXml(doc) : await processarPdf(doc, deps);
   } catch (e) {
     const tipo = (e as { tipoDocumento?: string | null }).tipoDocumento ?? null;
-    atualizarDocumento(doc.id, { status: 'erro', motivo: motivoDoErro(e), tipo_documento: tipo });
+    await atualizarDocumento(doc.id, { status: 'erro', motivo: motivoDoErro(e), tipo_documento: tipo });
     throw e;
   }
 }

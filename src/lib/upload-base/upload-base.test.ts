@@ -134,24 +134,24 @@ describe('processamento (aplicar_mapeamento + validar)', () => {
 
 describe('registro da base no banco', () => {
   test('cria a base do fundo, avisa upload recente e importa o resultados_matching', async () => {
-    const adm = fundos.criarAdministradora('Adm Teste Upload');
-    const fundo = fundos.criarFundo({ nome: 'FIDC Upload', cnpj: '11222333000181', administradora_id: adm.id });
+    const adm = await fundos.criarAdministradora('Adm Teste Upload');
+    const fundo = await fundos.criarFundo({ nome: 'FIDC Upload', cnpj: '11222333000181', administradora_id: adm.id });
     const arquivo = await xlsx({ P: [
       ['NOME_CEDENTE', 'DOC_CEDENTE', 'NOME_SACADO', 'DOC_SACADO', 'NU_DOCUMENTO', 'VALOR_NOMINAL'],
       ['EMPRESA A', '11222333000181', 'JOAO', '12345678909', '001', '10,00'],
     ] });
-    expect(registrar.uploadsRecentes({ fundo_id: fundo.id, data_referencia: '2026-08-15', modo: 'TRIMESTRE' }).tem_uploads_recentes).toBe(false);
+    expect((await registrar.uploadsRecentes({ fundo_id: fundo.id, data_referencia: '2026-08-15', modo: 'TRIMESTRE' })).tem_uploads_recentes).toBe(false);
     const r = await registrar.registrarBase({ fundo_id: fundo.id, data_referencia: '2026-08-15', modo: 'TRIMESTRE', arquivo: { nome: 'a.xlsx', conteudo: arquivo }, mapeamento: {} });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.base).toMatchObject({ nome: 'FIDC Upload — 3º Trim/2026', total_registros: 1, pendentes: { termo: 1, lastro: 1 }, blacklist: [] });
-    expect(repo.obterBase(r.base.base_id)).toMatchObject({
+    expect(await repo.obterBase(r.base.base_id)).toMatchObject({
       fundo_id: fundo.id, modo_referencia: 'TRIMESTRE', data_referencia: '2026-09-30', cnpj_fundo: '11222333000181',
       nome_fundo: 'FIDC Upload', administradora: 'Adm Teste Upload', origem: 'amostra',
     });
-    const recente = registrar.uploadsRecentes({ fundo_id: fundo.id, data_referencia: '2026-07-01', modo: 'TRIMESTRE' });
+    const recente = await registrar.uploadsRecentes({ fundo_id: fundo.id, data_referencia: '2026-07-01', modo: 'TRIMESTRE' });
     expect(recente).toMatchObject({ tem_uploads_recentes: true, quantidade_uploads: 1 });
-    expect(registrar.uploadsRecentes({ fundo_id: fundo.id, data_referencia: '2026-07-01', modo: 'DATA_REFERENCIA' }).tem_uploads_recentes).toBe(false);
+    expect((await registrar.uploadsRecentes({ fundo_id: fundo.id, data_referencia: '2026-07-01', modo: 'DATA_REFERENCIA' })).tem_uploads_recentes).toBe(false);
     await expect(registrar.registrarBase({ fundo_id: 999, data_referencia: '2026-08-15', modo: 'TRIMESTRE', arquivo: { nome: 'a.xlsx', conteudo: arquivo } }))
       .rejects.toThrow(/não está cadastrado/);
 
@@ -164,7 +164,7 @@ describe('registro da base no banco', () => {
     const previa = await registrar.previaResultados(resultado, nome);
     expect(previa).toMatchObject({ titulos: 1, pendentes: { termo: 0, lastro: 1 }, ja_batidos: 1, fundo_sugerido: { id: fundo.id } });
     const base = await registrar.registrarResultados({ arquivo: { nome, conteudo: resultado }, modo: 'DATA_REFERENCIA' });
-    expect(repo.obterBase(base.base_id)).toMatchObject({ origem: 'resultados_matching', fundo_id: fundo.id, ja_batidos: 1, pendentes: { termo: 0, lastro: 1 } });
+    expect(await repo.obterBase(base.base_id)).toMatchObject({ origem: 'resultados_matching', fundo_id: fundo.id, ja_batidos: 1, pendentes: { termo: 0, lastro: 1 } });
     await expect(registrar.previaResultados(arquivo, 'a.xlsx')).rejects.toThrow(/não é um resultados_matching/);
   });
 });

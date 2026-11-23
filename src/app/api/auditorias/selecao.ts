@@ -1,6 +1,6 @@
 import { db } from '@/lib/db';
-import { resumoDaAuditoria, type StatusAuditoria } from '@/lib/auditoria';
-import { obterBase } from '@/lib/repo';
+import { resumosDaAuditoria, type StatusAuditoria } from '@/lib/auditoria';
+import { listarBases } from '@/lib/repo';
 import { digitos as soDigitos } from '@/lib/texto';
 import { dataIsoValida, fimDoTrimestre, inicioDoTrimestre } from '@/lib/upload-base/datas';
 
@@ -89,16 +89,21 @@ function casaBusca(b: LinhaBase, busca: string): boolean {
 }
 
 /** Bases do filtro (busca e período), já com o resumo de auditoria de cada uma. */
-export function cartoesDoFiltro(filtro: Pick<FiltroSelecao, 'busca' | 'tipo' | 'ano' | 'trimestre' | 'data'> = {}): CartaoAuditoria[] {
+export async function cartoesDoFiltro(filtro: Pick<FiltroSelecao, 'busca' | 'tipo' | 'ano' | 'trimestre' | 'data'> = {}): Promise<CartaoAuditoria[]> {
   const intervalo = intervaloDoPeriodo(filtro);
-  const linhas = db().prepare(`SELECT b.id, b.nome, b.nome_fundo, b.cnpj_fundo, b.data_referencia, b.fundo_id, f.nome AS fundo_nome
-    FROM bases b LEFT JOIN fundos f ON f.id = b.fundo_id`).all() as LinhaBase[];
+  const todas = await (await db()).prepare(`SELECT b.id, b.nome, b.nome_fundo, b.cnpj_fundo, b.data_referencia, b.fundo_id, f.nome AS fundo_nome
+    FROM bases b LEFT JOIN fundos f ON f.id = b.fundo_id`).all<LinhaBase>();
+  const linhas = todas.filter((l) => {
+    if (intervalo && !(l.data_referencia && l.data_referencia.slice(0, 10) >= intervalo[0] && l.data_referencia.slice(0, 10) <= intervalo[1])) return false;
+    return !filtro.busca || casaBusca(l, filtro.busca);
+  });
+  // Resumos de todas as bases do filtro em poucas consultas agregadas (não várias por base).
+  const bases = new Map(linhas.length ? (await listarBases()).map((b) => [b.id, b]) : []);
+  const resumos = await resumosDaAuditoria(linhas.map((l) => l.id));
   const cartoes: CartaoAuditoria[] = [];
   for (const l of linhas) {
-    if (intervalo && !(l.data_referencia && l.data_referencia.slice(0, 10) >= intervalo[0] && l.data_referencia.slice(0, 10) <= intervalo[1])) continue;
-    if (filtro.busca && !casaBusca(l, filtro.busca)) continue;
-    const base = obterBase(l.id);
-    const resumo = resumoDaAuditoria(l.id);
+    const base = bases.get(l.id);
+    const resumo = resumos.get(l.id);
     if (!base || !resumo) continue;
     cartoes.push({
       base_id: base.id,
@@ -137,8 +142,8 @@ export function lerStatus(valor: unknown): StatusAuditoria | null {
   return null;
 }
 
-export function listarAuditorias(filtro: FiltroSelecao = {}): PaginaSelecao {
-  const cartoes = cartoesDoFiltro(filtro);
+export async function listarAuditorias(filtro: FiltroSelecao = {}): Promise<PaginaSelecao> {
+  const cartoes = await cartoesDoFiltro(filtro);
   const status = filtro.status ?? 'a_iniciar';
   const doStatus = cartoes.filter((c) => c.status === status);
   const porPagina = Math.min(100, Math.max(1, filtro.por_pagina ?? 16));
@@ -156,7 +161,7 @@ export function listarAuditorias(filtro: FiltroSelecao = {}): PaginaSelecao {
 }
 
 /** Resumo da Home: contagem por status e as bases em andamento mexidas por último. */
-export function painelInicial(limite = 4): { resumo: ResumoStatus; em_andamento: CartaoAuditoria[] } {
-  const cartoes = cartoesDoFiltro();
+export async function painelInicial(limite = 4): Promise<{ resumo: ResumoStatus; em_andamento: CartaoAuditoria[] }> {
+  const cartoes = await cartoesDoFiltro();
   return { resumo: contarStatus(cartoes), em_andamento: cartoes.filter((c) => c.status === 'em_andamento').slice(0, limite) };
 }

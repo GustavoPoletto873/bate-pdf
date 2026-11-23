@@ -35,28 +35,28 @@ export type LinhaResultado = {
 
 type LinhaBruta = { pendencia_id: number; lado: Lado; situacao: string } & Record<string, unknown>;
 
-export function linhasDeResultado(baseId: string): LinhaResultado[] {
-  const c = db();
-  const pendencias = c.prepare(`SELECT p.id AS pendencia_id, p.lado, p.situacao, ${COLUNAS_TITULO}
+export async function linhasDeResultado(baseId: string): Promise<LinhaResultado[]> {
+  const c = await db();
+  const pendencias = await c.prepare(`SELECT p.id AS pendencia_id, p.lado, p.situacao, ${COLUNAS_TITULO}
     FROM pendencias p JOIN titulos t ON t.id = p.titulo_id WHERE p.base_id = ? ORDER BY t.id, p.lado DESC`).all(baseId) as LinhaBruta[];
 
   type VinculoBruto = { pendencia_id: number; pdf_id: number | null; pdf_nome: string | null; pagina: number | null; marcacoes: string;
     leitura: string; origem: string; tipo_match: string; similaridade: number | null; criado_em: string };
   const vinculos = new Map<number, VinculoBruto>();
-  for (const v of c.prepare(`SELECT v.pendencia_id, v.pdf_id, d.nome_arquivo AS pdf_nome, v.pagina, v.marcacoes, v.leitura, v.origem,
+  for (const v of await c.prepare(`SELECT v.pendencia_id, v.pdf_id, d.nome_arquivo AS pdf_nome, v.pagina, v.marcacoes, v.leitura, v.origem,
       v.tipo_match, v.similaridade, v.criado_em
     FROM vinculos v JOIN pendencias p ON p.id = v.pendencia_id LEFT JOIN pdfs d ON d.id = v.pdf_id WHERE p.base_id = ?`).all(baseId) as VinculoBruto[]) {
     vinculos.set(v.pendencia_id, v);
   }
 
   const pre = new Map<number, LeituraLinha & { similaridade: number; pdf_nome: string | null; criado_em_pre: string }>();
-  for (const r of c.prepare(`SELECT pm.pendencia_id, pm.similaridade, pm.criado_em AS criado_em_pre, d.nome_arquivo AS pdf_nome, ${COLUNAS_LEITURA}
+  for (const r of await c.prepare(`SELECT pm.pendencia_id, pm.similaridade, pm.criado_em AS criado_em_pre, d.nome_arquivo AS pdf_nome, ${COLUNAS_LEITURA}
     FROM pre_matches pm JOIN leituras l ON l.id = pm.leitura_id LEFT JOIN pdfs d ON d.id = l.pdf_id WHERE pm.base_id = ?`).all(baseId) as
     (LeituraLinha & { pendencia_id: number; similaridade: number; pdf_nome: string | null; criado_em_pre: string })[]) {
     pre.set(r.pendencia_id, r);
   }
 
-  return pendencias.map((p) => {
+  return pendencias.map((p): LinhaResultado => {
     const titulo = tituloDaLinha(p);
     const base = { pendencia_id: p.pendencia_id, titulo_id: titulo.id, lado: p.lado, titulo };
     const v = vinculos.get(p.pendencia_id);
@@ -152,10 +152,10 @@ export function filtrarResultados(linhas: LinhaResultado[], f: FiltroResultados)
 // ---------------------------------------------------------------------------
 
 /** Papéis da BlackList por título ('Cedente', 'Sacado', 'Cedente / Sacado'). */
-function blacklistDaBase(baseId: string): Map<number, string> {
+async function blacklistDaBase(baseId: string): Promise<Map<number, string>> {
   const r = new Map<number, string>();
   try {
-    const linhas = db().prepare('SELECT titulo_id, papel FROM blacklist_ocorrencias WHERE base_id = ?').all(baseId) as { titulo_id: number; papel: string }[];
+    const linhas = await (await db()).prepare('SELECT titulo_id, papel FROM blacklist_ocorrencias WHERE base_id = ?').all(baseId) as { titulo_id: number; papel: string }[];
     const papeis = new Map<number, Set<string>>();
     for (const l of linhas) {
       const s = papeis.get(l.titulo_id) ?? new Set();
@@ -182,9 +182,9 @@ const ORIGEM_EXPORTADA: Record<string, string> = {
  * STATUS V (como no Bate Lastro); os que vieram batidos do Bate Lastro saem com STATUS V mas sem
  * leitura e sem DIV_* (o Inserir Resultado de lá não mexe nos vereditos que já tem).
  */
-export function linhasDaExportacao(baseId: string, opcoes: { incluirPendentes: boolean } = { incluirPendentes: true }): LinhaExportacao[] {
-  const blacklist = blacklistDaBase(baseId);
-  return linhasDeResultado(baseId)
+export async function linhasDaExportacao(baseId: string, opcoes: { incluirPendentes: boolean } = { incluirPendentes: true }): Promise<LinhaExportacao[]> {
+  const blacklist = await blacklistDaBase(baseId);
+  return (await linhasDeResultado(baseId))
     .filter((l) => opcoes.incluirPendentes || l.status === 'V')
     .map((l) => {
       const salvas: Partial<Record<CampoId, Veredito>> = l.origem === 'vinculo' && l.vereditos ? l.vereditos : {};
@@ -203,8 +203,8 @@ export function linhasDaExportacao(baseId: string, opcoes: { incluirPendentes: b
 }
 
 /** Título × lado ainda sem documento (pendências do export de pendências). */
-export function pendenciasParaExportar(baseId: string) {
-  const linhas = linhasDeResultado(baseId);
+export async function pendenciasParaExportar(baseId: string) {
+  const linhas = await linhasDeResultado(baseId);
   const porTitulo = new Map<number, { titulo: TituloDaBase; termo: 'V' | 'P' | null; lastro: 'V' | 'P' | null }>();
   for (const l of linhas) {
     const e = porTitulo.get(l.titulo_id) ?? { titulo: l.titulo, termo: null, lastro: null };

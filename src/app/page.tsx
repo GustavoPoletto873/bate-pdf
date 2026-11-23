@@ -5,8 +5,8 @@ import { montarPainelInicio } from '@/components/inicio/painel';
 // Lê o banco e a hora a cada visita (saudação e "continue de onde parou").
 export const dynamic = 'force-dynamic';
 
-export default function PaginaInicial() {
-  const painel = montarPainelInicio();
+export default async function PaginaInicial() {
+  const painel = await montarPainelInicio();
   return (
     <>
       <Inicio painel={painel} />
