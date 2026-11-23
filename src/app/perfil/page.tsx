@@ -1,7 +1,10 @@
 import { AlternarTema } from '@/components/AlternarTema';
 import { Pagina, Secao } from '@/components/Pagina';
-import { Botao, Etiqueta } from '@/components/ui';
-import { auth, loginAtivo, signOut } from '@/auth';
+import { Etiqueta } from '@/components/ui';
+import Link from 'next/link';
+import { BotaoSair } from '@/components/acesso/BotaoSair';
+import { loginObrigatorio } from '@/lib/auth/config';
+import { quemEsta } from '@/lib/auth/requisicao';
 import { armazenamentoNaNuvem } from '@/lib/arquivos';
 import { db, pastaDeDados, urlDoBanco } from '@/lib/db';
 import { MODELO_PADRAO, statusGemini } from '@/lib/ia/config';
@@ -12,15 +15,11 @@ const codigo = 'rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mo
 
 export default async function Perfil() {
   const ia = statusGemini();
-  const comLogin = loginAtivo();
-  const sessao = comLogin ? await auth() : null;
+  const comLogin = loginObrigatorio();
+  const quem = comLogin ? await quemEsta() : null;
   const bancoRemoto = urlDoBanco().remoto;
   const nuvem = armazenamentoNaNuvem();
 
-  async function sair() {
-    'use server';
-    await signOut({ redirectTo: '/entrar' });
-  }
   const uso = (await (await db()).prepare(`SELECT COUNT(*) chamadas, COALESCE(SUM(tokens_entrada), 0) entrada, COALESCE(SUM(tokens_saida), 0) saida,
     COALESCE(SUM(custo_usd), 0) custo FROM uso_ia`).get<{ chamadas: number; entrada: number; saida: number; custo: number }>())!;
   return (
@@ -31,15 +30,21 @@ export default async function Perfil() {
     >
       <div className="space-y-6">
         {comLogin && (
-          <Secao titulo="Conta" descricao="Login com o Google da empresa.">
-            <div className="flex items-center justify-between gap-4">
+          <Secao titulo="Conta" descricao="E-mail + senha + código do authenticator, como no Bate Lastro.">
+            <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <p className="font-semibold">{sessao?.user?.name ?? 'Conectado'}</p>
-                <p className="font-mono text-sm text-slate-600 dark:text-slate-400">{sessao?.user?.email}</p>
+                <p className="font-semibold">
+                  {quem?.nome ?? 'Conectado'}{' '}
+                  <Etiqueta cor={quem?.perfil === 'admin' ? 'violet' : 'slate'}>{quem?.perfil === 'admin' ? 'Administrador' : 'Usuário'}</Etiqueta>
+                </p>
+                <p className="font-mono text-sm text-slate-600 dark:text-slate-400">{quem?.email}</p>
               </div>
-              <form action={sair}>
-                <Botao type="submit" variante="secundario">Sair</Botao>
-              </form>
+              <div className="flex gap-2">
+                {quem?.perfil === 'admin' && (
+                  <Link href="/usuarios" className="lastro-botao lastro-botao-md lastro-botao-secundario">Usuários</Link>
+                )}
+                <BotaoSair />
+              </div>
             </div>
           </Secao>
         )}

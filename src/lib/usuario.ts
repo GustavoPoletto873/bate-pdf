@@ -1,8 +1,6 @@
-import { auth, loginAtivo } from '@/auth';
+import { quemEsta } from '@/lib/auth/requisicao';
 
-/** E-mail de quem está usando (versão na nuvem). Na versão local não há login: devolve null. */
+/** E-mail de quem está usando (com login). Na versão local, sem login, devolve null. */
 export async function usuarioAtual(): Promise<string | null> {
-  if (!loginAtivo()) return null;
-  const sessao = await auth();
-  return sessao?.user?.email ?? null;
+  return (await quemEsta())?.email ?? null;
 }

@@ -41,7 +41,7 @@ O mesmo código roda nos dois modos; quem escolhe são as variáveis de ambiente
 |---|---|---|
 | Banco | arquivo `data/bate-pdf.db` | Turso (`TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`) |
 | PDFs e arquivos | pasta `data/` | Vercel Blob privado (`BLOB_READ_WRITE_TOKEN`) |
-| Login | nenhum | Google, só `@denvercontabil.com.br` (`AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`) |
+| Login | nenhum (liga com `SESSAO_SEGREDO`) | sempre: e-mail + senha + authenticator, contas por convite (`SESSAO_SEGREDO`, `CHAVE_INSTALACAO`) |
 | Indexação dos PDFs | processo à parte (`scripts/indexador.ts`) | no servidor, depois da resposta; retomada quando a base é aberta |
 | Fila de leitura (Gemini) | contínua no servidor | por requisição; retomada quando o lote é acompanhado |
 | Envio de arquivos | direto para a rota | navegador → Blob (sem o limite de 4,5 MB da Vercel) → rota |
@@ -52,11 +52,34 @@ Passo a passo (as contas e chaves são criadas por quem administra; nunca vão p
 
 1. **Turso**: criar o banco (`turso db create lastro`), pegar a URL (`turso db show lastro --url`) e um token
    (`turso db tokens create lastro`). O esquema é criado sozinho na primeira requisição.
-2. **Google OAuth** (Google Cloud Console, projeto da empresa): tela de consentimento *Interno* e um ID do cliente
-   OAuth do tipo *Aplicativo da Web*, com o redirecionamento `https://<domínio-do-app>/api/auth/callback/google`.
-3. **Vercel**: importar o repositório; em *Storage*, criar um **Blob privado** e ligá-lo ao projeto (cria o
-   `BLOB_READ_WRITE_TOKEN`); cadastrar as demais variáveis (`npx auth secret` gera o `AUTH_SECRET`) e fazer o deploy.
+2. **Vercel**: importar o repositório; em *Storage*, criar um **Blob privado** e ligá-lo ao projeto (cria o
+   `BLOB_READ_WRITE_TOKEN`); cadastrar as demais variáveis e fazer o deploy. `SESSAO_SEGREDO` (32+ caracteres) e
+   `CHAVE_INSTALACAO` (16+) podem ser gerados com
+   `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`.
    O `vercel.json` dá 300 s às rotas da API (indexação e leitura por IA rodam depois da resposta).
+3. **Primeiro acesso**: abrir o app. Sem nenhuma conta, a tela de entrar pede a `CHAVE_INSTALACAO` e cria o primeiro
+   administrador (senha + authenticator). Depois, em **Perfil › Usuários**, ele convida as outras pessoas.
+
+### Login
+
+O mesmo modelo do Bate Lastro e do `dashboard-lastro`: **e-mail + senha** e, em seguida, o **código de 6 dígitos do
+authenticator** (Google ou Microsoft Authenticator, nome “Lastro Bate PDF”). O authenticator é obrigatório.
+
+- **Contas por convite.** Um administrador, em **Perfil › Usuários**, informa nome, e-mail e perfil e recebe um link
+  (48 h, uso único). Pelo link a pessoa cria a senha e configura o authenticator. Só e-mails `@denvercontabil.com.br`
+  (`ACESSO_DOMINIOS`) ou os liberados em `ACESSO_EMAILS`.
+- **Senha forte**, com a regra do Bate Lastro: 12+ caracteres, maiúscula, minúscula, número, símbolo e sem 3 iguais ou
+  em sequência.
+- **Esqueceu a senha ou trocou de celular:** o administrador gera um link de redefinição (*Redefinir acesso*). Não há
+  envio de e-mail.
+- **Sessão:** cookie httpOnly cifrado (AES-256-GCM, chave derivada do `SESSAO_SEGREDO`), registrada na conta: sair,
+  desativar ou encerrar sessões derruba o acesso (em até 30 s nas outras instâncias). Sem usar por 30 dias, pede login.
+- **Proteções:** limite de tentativas por IP e por conta; cada código vale uma vez; senhas com scrypt; segredo do
+  authenticator cifrado; o convite guarda só o hash do token.
+- As contas ficam no banco do app (tabela `contas`). **Não troque o `SESSAO_SEGREDO`** depois de criar contas: ele
+  cifra os segredos do authenticator, e todos teriam de configurar de novo.
+- Na versão local, sem `SESSAO_SEGREDO`, não há login (abre direto, como sempre). Com ele, o login liga também no
+  computador.
 
 Limites conhecidos na nuvem: a consulta de NF Status mostra o progresso só quando a página cai na mesma instância
 que iniciou a consulta (a consulta em si termina); a indexação de muitos PDFs grandes anda em rodadas de ~3 min.
@@ -109,7 +132,7 @@ qual página foram vinculados, para uma importação completa no futuro.
   CNPJ), não com o histórico de produção. Na primeira pré-classificação de uma base nova, mais títulos caem em “Para
   decidir” (o mesmo comportamento de “fundo novo” do Bate Lastro). Re-rodar depois de conferir alguns títulos espalha
   o aprendizado.
-- **Sem login e sem multiusuário.** É uma ferramenta local. Duas abas na mesma base funcionam, mas o servidor é um só.
+- **Sem login na versão local** (a não ser com `SESSAO_SEGREDO`). É uma ferramenta local. Duas abas na mesma base funcionam, mas o servidor é um só.
 - **A pré-classificação roda no processo do servidor.** Numa base muito grande, o servidor fica ocupado até terminar.
 
 ## Leitura por IA (Gemini)

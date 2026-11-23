@@ -2,7 +2,8 @@ import { ErroDeUso, responder } from '@/lib/api';
 import { entradaDoMotor, obterPreClassificacao, salvarPreClassificacao } from '@/lib/repo';
 import { preClassificar, regrasDoFundoDaAmostra } from '@/lib/motor';
 
-export const maxDuration = 1800;
+// Teto do plano Hobby da Vercel (300 s). No computador não há limite.
+export const maxDuration = 300;
 
 type Global = typeof globalThis & { __batePdfPreEmCurso?: Map<string, Promise<unknown>> };
 

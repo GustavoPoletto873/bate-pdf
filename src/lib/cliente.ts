@@ -28,6 +28,11 @@ export async function chamar<T>(url: string, init?: RequestInit): Promise<T> {
   }
   const tipo = resposta.headers.get('content-type') ?? '';
   const dados = tipo.includes('application/json') ? await resposta.json() : null;
+  if (resposta.status === 401 && (dados as { entrar?: boolean })?.entrar) {
+    // Sessão terminou (login ligado): volta para a tela de entrar e depois para esta página.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+    window.location.href = '/entrar?voltar=' + encodeURIComponent(window.location.pathname + window.location.search);
+  }
   if (!resposta.ok) {
     throw new ErroApi((dados as { erro?: string })?.erro ?? `Erro ${resposta.status}`, resposta.status, dados);
   }

@@ -6,6 +6,7 @@ import { MONITORAMENTO } from './monitoramento';
 import { NOTAS } from './notas';
 import { RELATORIOS } from './relatorios';
 import { TREINO } from './treino';
+import { ACESSO } from './acesso';
 import { NUCLEO } from './nucleo';
 import type { Esquema } from './tipos';
 
@@ -16,7 +17,7 @@ export type { ColunaNova, Esquema } from './tipos';
  * do menu do Bate Lastro) cuida do seu arquivo aqui; para acrescentar uma coluna numa tabela que
  * já existe em bancos antigos, use `colunas` (ALTER TABLE só quando falta).
  */
-export const ESQUEMAS: Esquema[] = [NUCLEO, CADASTROS, ANEXO, LEITURAS, MONITORAMENTO, NOTAS, RELATORIOS, TREINO];
+export const ESQUEMAS: Esquema[] = [NUCLEO, CADASTROS, ANEXO, LEITURAS, MONITORAMENTO, NOTAS, RELATORIOS, TREINO, ACESSO];
 
 export async function aplicarEsquemas(conexao: Banco, esquemas: Esquema[] = ESQUEMAS): Promise<void> {
   for (const e of esquemas) await conexao.exec(e.sql);

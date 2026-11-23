@@ -112,6 +112,9 @@ export function MenuLateral() {
     };
   }, [aberto]);
 
+  // Telas de acesso (entrar, convite) ocupam a tela toda, sem o menu.
+  if (caminho === '/entrar' || caminho === '/convite') return null;
+
   return (
     <nav
       ref={raiz}

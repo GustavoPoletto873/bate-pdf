@@ -1,28 +1,46 @@
-import { NextResponse, type NextFetchEvent, type NextRequest } from 'next/server';
-import { auth, emailPermitido, loginAtivo } from '@/auth';
+import { NextResponse, type NextRequest } from 'next/server';
+import { loginObrigatorio, problemaDeConfiguracao, segredoSessao } from '@/lib/auth/config';
+import { cookieSeguro, RENOVAR_MS, renovarSessao, sessaoValida } from '@/lib/auth/requisicao';
+import { abrir, COOKIE_SESSAO, opcoesCookie, selar } from '@/lib/auth/sessao';
 
 /**
- * Na nuvem, toda página e toda API exigem login com o Google da empresa. Na versão local
- * (sem AUTH_GOOGLE_ID) passa direto.
+ * Com o login ligado (sempre na Vercel; no computador só com SESSAO_SEGREDO), toda página e toda
+ * API exigem uma sessão válida: cookie cifrado + sessão registrada numa conta ativa. Ficam abertas
+ * só as telas de acesso (/entrar, /convite) e as rotas /api/auth/*. Sem login, passa direto.
  */
-const comLogin = auth((req) => {
-  const { pathname, search } = req.nextUrl;
-  if (pathname.startsWith('/api/auth') || pathname === '/entrar') return NextResponse.next();
-  if (emailPermitido(req.auth?.user?.email)) return NextResponse.next();
-  if (pathname.startsWith('/api/')) {
-    return NextResponse.json({ erro: 'Sessão expirada. Entre de novo com o Google da empresa.' }, { status: 401 });
-  }
-  const entrar = new URL('/entrar', req.url);
-  entrar.searchParams.set('voltar', pathname + search);
-  return NextResponse.redirect(entrar);
-});
+const ABERTAS = ['/entrar', '/convite', '/api/auth/'];
 
-export default function proxy(req: NextRequest, ev: NextFetchEvent) {
-  if (!loginAtivo()) return NextResponse.next();
-  return (comLogin as unknown as (r: NextRequest, e: NextFetchEvent) => Promise<Response>)(req, ev);
+export async function proxy(request: NextRequest) {
+  if (!loginObrigatorio()) return NextResponse.next();
+  const { pathname, search } = request.nextUrl;
+  if (ABERTAS.some((p) => pathname === p || pathname.startsWith(p.endsWith('/') ? p : p + '/'))) return NextResponse.next();
+  const api = pathname.startsWith('/api/');
+
+  const problema = problemaDeConfiguracao();
+  if (problema) {
+    if (api) return NextResponse.json({ erro: `O login do Lastro não está configurado: ${problema}` }, { status: 503 });
+    return NextResponse.redirect(new URL('/entrar?erro=config', request.url));
+  }
+
+  const s = abrir(request.cookies.get(COOKIE_SESSAO)?.value, segredoSessao());
+  const quem = s ? await sessaoValida(s) : null;
+  if (!s || !quem) {
+    if (api) return NextResponse.json({ entrar: true, erro: 'Sua sessão terminou. Entre no Lastro de novo.' }, { status: 401 });
+    const destino = new URL('/entrar', request.url);
+    destino.searchParams.set('voltar', pathname + search);
+    return NextResponse.redirect(destino);
+  }
+
+  const r = NextResponse.next();
+  const agora = Date.now();
+  if (agora - s.visto > RENOVAR_MS) {
+    await renovarSessao(s, agora).catch(() => null);
+    r.cookies.set(COOKIE_SESSAO, selar({ ...s, visto: agora }, segredoSessao()), opcoesCookie(cookieSeguro(request)));
+  }
+  return r;
 }
 
 export const config = {
-  // Tudo, menos arquivos estáticos do Next e ícones.
+  // Tudo, menos arquivos estáticos do Next e ícones (a tela de entrar também precisa deles).
   matcher: ['/((?!_next/static|_next/image|favicon.ico|icon.svg|.*\\.(?:png|jpg|jpeg|svg|webp|woff2?|ico)$).*)'],
 };
