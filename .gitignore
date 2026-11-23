@@ -43,3 +43,6 @@ next-env.d.ts
 # bate-pdf: dados locais (banco SQLite, PDFs enviados) e o worker do pdf.js copiado
 /data/
 /public/pdf.worker.min.mjs
+
+# graphify (grafo gerado do código)
+graphify-out/
